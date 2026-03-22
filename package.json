@@ -21,6 +21,7 @@
   "homepage": "https://github.com/decord228/YamikoPixelBattleServer#readme",
   "dependencies": {
     "express": "^5.2.1",
+    "redis": "^5.11.0",
     "ws": "^8.20.0"
   }
 }

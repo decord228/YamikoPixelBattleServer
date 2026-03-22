@@ -2,6 +2,7 @@
 const { WebSocketServer } = require('ws');
 const fs = require('fs');
 const path = require('path');
+const { createClient } = require('redis'); // Подключаем Redis
 
 // === НАСТРОЙКИ СЕРВЕРА ===
 const PORT = process.env.PORT || 3000;
@@ -10,107 +11,146 @@ const CANVAS_HEIGHT = 256;
 const CANVAS_SIZE = CANVAS_WIDTH * CANVAS_HEIGHT;
 const CANVAS_FILE = path.join(__dirname, 'canvas.bin');
 
-// Инициализируем холст в оперативной памяти (1 байт = 1 пиксель = индекс цвета)
-// По умолчанию заполняем 0 (Белый цвет из твоей палитры)
 let canvasData = new Uint8Array(CANVAS_SIZE);
-canvasData.fill(0);
+canvasData.fill(0); // 0 = Белый цвет
 
-// Пытаемся загрузить сохраненный холст, если сервер перезапускался
-if (fs.existsSync(CANVAS_FILE)) {
-    try {
-        const savedData = fs.readFileSync(CANVAS_FILE);
-        if (savedData.length === CANVAS_SIZE) {
-            canvasData.set(savedData);
-            console.log("✅ Холст успешно восстановлен из canvas.bin");
-        } else {
-            console.warn("⚠️ Размер canvas.bin не совпадает, начинаем с чистого листа.");
+// === ПОДКЛЮЧЕНИЕ REDIS ===
+const redisClient = createClient({
+    url: process.env.REDIS_URL
+});
+
+redisClient.on('error', (err) => console.error('❌ Ошибка Redis:', err));
+
+async function initDatabases() {
+    if (process.env.REDIS_URL) {
+        try {
+            await redisClient.connect();
+            console.log("✅ Успешное подключение к Redis!");
+            
+            // Загружаем холст из Redis (в формате Base64, чтобы не было проблем с кодировками)
+            const savedB64 = await redisClient.get('pixel_canvas');
+            if (savedB64) {
+                const buf = Buffer.from(savedB64, 'base64');
+                if (buf.length === CANVAS_SIZE) {
+                    canvasData.set(buf);
+                    console.log("✅ Холст успешно восстановлен из Redis!");
+                    return; // Успешно загрузили
+                }
+            }
+            console.log("⚠️ В Redis пусто или размер холста не совпадает. Начинаем с чистого листа.");
+        } catch (e) {
+            console.error("❌ Не удалось загрузить из Redis. Пробуем локальный файл...", e);
         }
-    } catch (e) {
-        console.error("❌ Ошибка чтения canvas.bin:", e);
+    } else {
+        console.log("⚠️ REDIS_URL не указан в Environment. Используем только локальное сохранение.");
+    }
+
+    // Локальный фоллбэк (если Redis нет или он упал)
+    if (fs.existsSync(CANVAS_FILE)) {
+        try {
+            const savedData = fs.readFileSync(CANVAS_FILE);
+            if (savedData.length === CANVAS_SIZE) {
+                canvasData.set(savedData);
+                console.log("✅ Холст восстановлен из локального canvas.bin");
+            }
+        } catch (e) {
+            console.error("❌ Ошибка чтения canvas.bin:", e);
+        }
     }
 }
 
-// === ПОДНЯТИЕ СЕРВЕРА ===
-const app = express();
-// Простой HTTP ответ, чтобы Render понимал, что сервер жив
-app.get('/', (req, res) => res.send('Pixel Battle Server is Running!'));
+// Инициализируем базы и стартуем сервер
+initDatabases().then(() => {
+    const app = express();
+    app.get('/', (req, res) => res.send('Pixel Battle Server is Running with Redis!'));
 
-const server = app.listen(PORT, () => {
-    console.log(`🚀 WebSocket сервер запущен на порту ${PORT}`);
-});
-
-const wss = new WebSocketServer({ server });
-
-// Буфер для сбора всех кликов за короткий промежуток времени (Батчинг)
-let pixelBatchBuffer = [];
-
-wss.on('connection', (ws) => {
-    console.log("Пользователь подключился. Всего онлайн:", wss.clients.size);
-
-    // При подключении сразу отправляем клиенту ВЕСЬ холст бинарником (65 КБ)
-    // Клиент поймет, что если пришел большой файл — это фулл-синк
-    ws.send(canvasData);
-
-    ws.on('message', (message) => {
-        // Ожидаем бинарное сообщение ровно 5 байт: [X_high, X_low, Y_high, Y_low, ColorIndex]
-        if (Buffer.isBuffer(message) && message.length === 5) {
-            const x = (message[0] << 8) | message[1];
-            const y = (message[2] << 8) | message[3];
-            const colorIdx = message[4];
-
-            // Валидация координат и цвета (защита от читеров)
-            if (x >= 0 && x < CANVAS_WIDTH && y >= 0 && y < CANVAS_HEIGHT && colorIdx >= 0 && colorIdx < 32) {
-                const idx = y * CANVAS_WIDTH + x;
-                
-                // Если цвет действительно изменился
-                if (canvasData[idx] !== colorIdx) {
-                    canvasData[idx] = colorIdx; // Пишем в оперативку (наносекунды)
-                    pixelBatchBuffer.push({ x, y, c: colorIdx }); // Добавляем в очередь на рассылку
-                }
-            }
-        }
+    const server = app.listen(PORT, () => {
+        console.log(`🚀 WebSocket сервер запущен на порту ${PORT}`);
     });
 
-    ws.on('close', () => {
-        console.log("Пользователь отключился. Онлайн:", wss.clients.size);
-    });
-});
+    const wss = new WebSocketServer({ server });
+    let pixelBatchBuffer = [];
 
-// === СИСТЕМА БАТЧИНГА И РАССЫЛКИ (ТРОТТЛИНГ) ===
-// Рассылаем накопившиеся пиксели всем игрокам 10 раз в секунду
-setInterval(() => {
-    if (pixelBatchBuffer.length > 0) {
-        // Упаковываем массив объектов в сырые байты (по 5 байт на пиксель)
-        const batchSize = pixelBatchBuffer.length;
-        const sendBuffer = new Uint8Array(batchSize * 5);
-        
-        for (let i = 0; i < batchSize; i++) {
-            const p = pixelBatchBuffer[i];
-            sendBuffer[i * 5 + 0] = (p.x >> 8) & 0xFF;
-            sendBuffer[i * 5 + 1] = p.x & 0xFF;
-            sendBuffer[i * 5 + 2] = (p.y >> 8) & 0xFF;
-            sendBuffer[i * 5 + 3] = p.y & 0xFF;
-            sendBuffer[i * 5 + 4] = p.c;
-        }
+    function broadcastOnlineCount() {
+        const count = wss.clients.size;
+        const buffer = new Uint8Array(3);
+        buffer[0] = 255; 
+        buffer[1] = (count >> 8) & 0xFF;
+        buffer[2] = count & 0xFF;
 
-        // Рассылаем один пакет всем активным клиентам
         wss.clients.forEach(client => {
-            if (client.readyState === 1) { // 1 === OPEN
-                client.send(sendBuffer);
+            if (client.readyState === 1) {
+                client.send(buffer);
+            }
+        });
+    }
+
+    wss.on('connection', (ws) => {
+        console.log("Пользователь подключился. Всего онлайн:", wss.clients.size);
+        
+        ws.send(canvasData);
+        broadcastOnlineCount();
+
+        ws.on('message', (message) => {
+            if (Buffer.isBuffer(message) && message.length === 5) {
+                const x = (message[0] << 8) | message[1];
+                const y = (message[2] << 8) | message[3];
+                const colorIdx = message[4];
+
+                if (x >= 0 && x < CANVAS_WIDTH && y >= 0 && y < CANVAS_HEIGHT && colorIdx >= 0 && colorIdx < 32) {
+                    const idx = y * CANVAS_WIDTH + x;
+                    if (canvasData[idx] !== colorIdx) {
+                        canvasData[idx] = colorIdx; 
+                        pixelBatchBuffer.push({ x, y, c: colorIdx }); 
+                    }
+                }
             }
         });
 
-        // Очищаем буфер
-        pixelBatchBuffer = [];
-    }
-}, 100);
+        ws.on('close', () => {
+            console.log("Пользователь отключился. Онлайн:", wss.clients.size);
+            broadcastOnlineCount();
+        });
+    });
 
-// === СИСТЕМА БЭКАПОВ ===
-// Сохраняем холст на диск каждые 5 секунд
-setInterval(() => {
-    try {
-        fs.writeFileSync(CANVAS_FILE, canvasData);
-    } catch (e) {
-        console.error("❌ Ошибка сохранения бэкапа:", e);
-    }
-}, 5000);
+    // Рассылка пакетов игрокам (10 раз в секунду)
+    setInterval(() => {
+        if (pixelBatchBuffer.length > 0) {
+            const batchSize = pixelBatchBuffer.length;
+            const sendBuffer = new Uint8Array(batchSize * 5);
+            
+            for (let i = 0; i < batchSize; i++) {
+                const p = pixelBatchBuffer[i];
+                sendBuffer[i * 5 + 0] = (p.x >> 8) & 0xFF;
+                sendBuffer[i * 5 + 1] = p.x & 0xFF;
+                sendBuffer[i * 5 + 2] = (p.y >> 8) & 0xFF;
+                sendBuffer[i * 5 + 3] = p.y & 0xFF;
+                sendBuffer[i * 5 + 4] = p.c;
+            }
+
+            wss.clients.forEach(client => {
+                if (client.readyState === 1) { 
+                    client.send(sendBuffer);
+                }
+            });
+            pixelBatchBuffer = [];
+        }
+    }, 100);
+
+    // === БЭКАП ХОЛСТА (каждые 15 секунд) ===
+    setInterval(async () => {
+        if (redisClient.isOpen) {
+            try {
+                // Сохраняем в Redis
+                await redisClient.set('pixel_canvas', Buffer.from(canvasData).toString('base64'));
+            } catch (e) {
+                console.error("❌ Ошибка сохранения в Redis:", e);
+            }
+        }
+        
+        // Всегда дублируем локально
+        try {
+            fs.writeFileSync(CANVAS_FILE, canvasData);
+        } catch (e) {}
+    }, 15000);
+});
