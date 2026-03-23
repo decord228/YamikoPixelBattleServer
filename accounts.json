@@ -1,0 +1,22 @@
+{
+  "123": {
+    "password": "123",
+    "email": "123",
+    "role": "user",
+    "pixels": 0,
+    "rank": "Новичок",
+    "avatar": "",
+    "banned": false,
+    "timeout_until": 0
+  },
+  "d3cord": {
+    "password": "decord2281B.",
+    "email": "otarasik10@gmail.com",
+    "role": "admin",
+    "pixels": 0,
+    "rank": "Новичок",
+    "avatar": "",
+    "banned": false,
+    "timeout_until": 0
+  }
+}
