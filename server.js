@@ -2,7 +2,7 @@
 const { WebSocketServer } = require('ws');
 const fs = require('fs');
 const path = require('path');
-const { createClient } = require('redis'); // Подключаем Redis
+const { createClient } = require('redis');
 
 // === НАСТРОЙКИ СЕРВЕРА ===
 const PORT = process.env.PORT || 3000;
@@ -14,12 +14,30 @@ const CANVAS_FILE = path.join(__dirname, 'canvas.bin');
 let canvasData = new Uint8Array(CANVAS_SIZE);
 canvasData.fill(0); // 0 = Белый цвет
 
-// === ПОДКЛЮЧЕНИЕ REDIS ===
+// === ПОДКЛЮЧЕНИЕ REDIS (С ЗАЩИТОЙ ОТ ОБРЫВОВ) ===
 const redisClient = createClient({
-    url: process.env.REDIS_URL
+    url: process.env.REDIS_URL,
+    pingInterval: 120000, // Пингуем базу каждые 2 минуты, чтобы не засыпала
+    socket: {
+        reconnectStrategy: (retries) => {
+            console.log(`⚠️ Потеряно соединение с Redis. Попытка переподключения #${retries}...`);
+            // Если упало - пробуем переподключиться через 3 секунды (максимум 20 раз)
+            if (retries > 20) {
+                console.error("❌ Redis окончательно отвалился. Больше не пытаемся.");
+                return new Error("Retry time exhausted");
+            }
+            return 3000; 
+        }
+    }
 });
 
-redisClient.on('error', (err) => console.error('❌ Ошибка Redis:', err));
+// Отлавливаем ошибки, чтобы сервер не падал (красный крестик не убивал процесс)
+redisClient.on('error', (err) => {
+    // Мы глушим вывод ошибки, если это просто закрытие сокета (так как стратегия переподключения сработает сама)
+    if (!err.message.includes('Socket closed unexpectedly')) {
+        console.error('❌ Ошибка Redis:', err);
+    }
+});
 
 async function initDatabases() {
     if (process.env.REDIS_URL) {
@@ -27,14 +45,13 @@ async function initDatabases() {
             await redisClient.connect();
             console.log("✅ Успешное подключение к Redis!");
             
-            // Загружаем холст из Redis (в формате Base64, чтобы не было проблем с кодировками)
             const savedB64 = await redisClient.get('pixel_canvas');
             if (savedB64) {
                 const buf = Buffer.from(savedB64, 'base64');
                 if (buf.length === CANVAS_SIZE) {
                     canvasData.set(buf);
                     console.log("✅ Холст успешно восстановлен из Redis!");
-                    return; // Успешно загрузили
+                    return; 
                 }
             }
             console.log("⚠️ В Redis пусто или размер холста не совпадает. Начинаем с чистого листа.");
@@ -45,7 +62,7 @@ async function initDatabases() {
         console.log("⚠️ REDIS_URL не указан в Environment. Используем только локальное сохранение.");
     }
 
-    // Локальный фоллбэк (если Redis нет или он упал)
+    // Фоллбэк на локальный файл
     if (fs.existsSync(CANVAS_FILE)) {
         try {
             const savedData = fs.readFileSync(CANVAS_FILE);
@@ -113,7 +130,6 @@ initDatabases().then(() => {
         });
     });
 
-    // Рассылка пакетов игрокам (10 раз в секунду)
     setInterval(() => {
         if (pixelBatchBuffer.length > 0) {
             const batchSize = pixelBatchBuffer.length;
@@ -141,14 +157,12 @@ initDatabases().then(() => {
     setInterval(async () => {
         if (redisClient.isOpen) {
             try {
-                // Сохраняем в Redis
                 await redisClient.set('pixel_canvas', Buffer.from(canvasData).toString('base64'));
             } catch (e) {
                 console.error("❌ Ошибка сохранения в Redis:", e);
             }
         }
         
-        // Всегда дублируем локально
         try {
             fs.writeFileSync(CANVAS_FILE, canvasData);
         } catch (e) {}
