@@ -2,7 +2,7 @@
 const { WebSocketServer } = require('ws');
 const fs = require('fs');
 const path = require('path');
-const { createClient } = require('redis');
+const { Redis } = require('@upstash/redis'); // Используем REST-модуль от Upstash
 
 // === НАСТРОЙКИ СЕРВЕРА ===
 const PORT = process.env.PORT || 3000;
@@ -12,40 +12,23 @@ const CANVAS_SIZE = CANVAS_WIDTH * CANVAS_HEIGHT;
 const CANVAS_FILE = path.join(__dirname, 'canvas.bin');
 
 let canvasData = new Uint8Array(CANVAS_SIZE);
-canvasData.fill(0); // 0 = Белый цвет
+canvasData.fill(0); 
 
-// === ПОДКЛЮЧЕНИЕ REDIS (С ЗАЩИТОЙ ОТ ОБРЫВОВ) ===
-const redisClient = createClient({
-    url: process.env.REDIS_URL,
-    pingInterval: 120000, // Пингуем базу каждые 2 минуты, чтобы не засыпала
-    socket: {
-        reconnectStrategy: (retries) => {
-            console.log(`⚠️ Потеряно соединение с Redis. Попытка переподключения #${retries}...`);
-            // Если упало - пробуем переподключиться через 3 секунды (максимум 20 раз)
-            if (retries > 20) {
-                console.error("❌ Redis окончательно отвалился. Больше не пытаемся.");
-                return new Error("Retry time exhausted");
-            }
-            return 3000; 
-        }
-    }
-});
-
-// Отлавливаем ошибки, чтобы сервер не падал (красный крестик не убивал процесс)
-redisClient.on('error', (err) => {
-    // Мы глушим вывод ошибки, если это просто закрытие сокета (так как стратегия переподключения сработает сама)
-    if (!err.message.includes('Socket closed unexpectedly')) {
-        console.error('❌ Ошибка Redis:', err);
-    }
-});
+// === ПОДКЛЮЧЕНИЕ REDIS (REST API - БЕЗ РАЗРЫВОВ) ===
+let redis = null;
+if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
+    redis = new Redis({
+        url: process.env.UPSTASH_REDIS_REST_URL,
+        token: process.env.UPSTASH_REDIS_REST_TOKEN,
+    });
+}
 
 async function initDatabases() {
-    if (process.env.REDIS_URL) {
+    if (redis) {
         try {
-            await redisClient.connect();
-            console.log("✅ Успешное подключение к Redis!");
+            console.log("⏳ Пытаемся загрузить холст из Upstash Redis...");
+            const savedB64 = await redis.get('pixel_canvas');
             
-            const savedB64 = await redisClient.get('pixel_canvas');
             if (savedB64) {
                 const buf = Buffer.from(savedB64, 'base64');
                 if (buf.length === CANVAS_SIZE) {
@@ -54,12 +37,12 @@ async function initDatabases() {
                     return; 
                 }
             }
-            console.log("⚠️ В Redis пусто или размер холста не совпадает. Начинаем с чистого листа.");
+            console.log("⚠️ В Redis пусто или размер не совпадает. Начинаем с чистого листа.");
         } catch (e) {
-            console.error("❌ Не удалось загрузить из Redis. Пробуем локальный файл...", e);
+            console.error("❌ Не удалось загрузить из Redis. Пробуем локальный файл...", e.message);
         }
     } else {
-        console.log("⚠️ REDIS_URL не указан в Environment. Используем только локальное сохранение.");
+        console.log("⚠️ Токены Upstash не указаны в Environment. Используем только локальное сохранение.");
     }
 
     // Фоллбэк на локальный файл
@@ -79,7 +62,7 @@ async function initDatabases() {
 // Инициализируем базы и стартуем сервер
 initDatabases().then(() => {
     const app = express();
-    app.get('/', (req, res) => res.send('Pixel Battle Server is Running with Redis!'));
+    app.get('/', (req, res) => res.send('Pixel Battle Server is Running with Upstash REST!'));
 
     const server = app.listen(PORT, () => {
         console.log(`🚀 WebSocket сервер запущен на порту ${PORT}`);
@@ -147,7 +130,7 @@ initDatabases().then(() => {
             wss.clients.forEach(client => {
                 if (client.readyState === 1) { 
                     client.send(sendBuffer);
-                }
+            }
             });
             pixelBatchBuffer = [];
         }
@@ -155,11 +138,11 @@ initDatabases().then(() => {
 
     // === БЭКАП ХОЛСТА (каждые 15 секунд) ===
     setInterval(async () => {
-        if (redisClient.isOpen) {
+        if (redis) {
             try {
-                await redisClient.set('pixel_canvas', Buffer.from(canvasData).toString('base64'));
+                await redis.set('pixel_canvas', Buffer.from(canvasData).toString('base64'));
             } catch (e) {
-                console.error("❌ Ошибка сохранения в Redis:", e);
+                console.error("❌ Ошибка сохранения в Redis:", e.message);
             }
         }
         
