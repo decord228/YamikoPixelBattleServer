@@ -1,433 +1,500 @@
-﻿const express = require('express');
+const express = require('express');
 const { WebSocketServer } = require('ws');
 const fs = require('fs');
 const path = require('path');
-const { Redis } = require('@upstash/redis');
 
-// === НАСТРОЙКИ СЕРВЕРА ===
+// Try to load upstash redis if env vars present
+let Redis = null;
+try { Redis = require('@upstash/redis').Redis; } catch(e) {}
+
+// === НАСТРОЙКИ ===
 const PORT = process.env.PORT || 3000;
 const CANVAS_FILE = path.join(__dirname, 'canvas.bin');
 const META_FILE = path.join(__dirname, 'canvas_meta.json');
 const ACCOUNTS_FILE = path.join(__dirname, 'accounts.json');
-const ADMIN_USERNAME = "Yamiko"; // Резервный админ
+const SETTINGS_FILE = path.join(__dirname, 'server_settings.json');
+const ADMIN_USERNAME = "Yamiko";
 
-// Динамические параметры размера холста
 let CANVAS_WIDTH = 256;
 let CANVAS_HEIGHT = 256;
 let CANVAS_SIZE = CANVAS_WIDTH * CANVAS_HEIGHT;
 let canvasData = null;
+let isDirty = false; // Flag to avoid redundant saves
 
-// === БАЗА АККАУНТОВ (Локальный кэш для быстрой работы админки) ===
-let accounts = {};
-if (fs.existsSync(ACCOUNTS_FILE)) {
-    try {
-        accounts = JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf8'));
-    } catch (e) {
-        console.error("❌ Ошибка чтения accounts.json:", e);
-    }
+// === SERVER SETTINGS ===
+let serverSettings = {
+  cursorTrackingEnabled: false,
+  cooldownMs: 3000
+};
+if (fs.existsSync(SETTINGS_FILE)) {
+  try { serverSettings = { ...serverSettings, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) }; } catch(e) {}
+}
+function saveSettings() {
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(serverSettings, null, 2));
 }
 
-// Принудительно делаем тебя админом при запуске, если аккаунт уже есть
+// === ACCOUNTS ===
+let accounts = {};
+if (fs.existsSync(ACCOUNTS_FILE)) {
+  try { accounts = JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf8')); } catch(e) { console.error("❌ Ошибка чтения accounts.json:", e); }
+}
+// Ensure d3cord is admin
 if (accounts["d3cord"] && accounts["d3cord"].email === "otarasik10@gmail.com") {
-    accounts["d3cord"].role = "admin";
+  accounts["d3cord"].role = "admin";
+}
+function saveAccounts() {
+  try { fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(accounts, null, 2)); } catch(e) {}
 }
 saveAccounts();
 
-function saveAccounts() {
-    fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(accounts, null, 2));
-}
-
-// === ПОДКЛЮЧЕНИЕ REDIS ===
+// === REDIS ===
 let redis = null;
-if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
-    redis = new Redis({
-        url: process.env.UPSTASH_REDIS_REST_URL,
-        token: process.env.UPSTASH_REDIS_REST_TOKEN,
-    });
+if (Redis && process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
+  redis = new Redis({ url: process.env.UPSTASH_REDIS_REST_URL, token: process.env.UPSTASH_REDIS_REST_TOKEN });
 }
 
+// === INIT DATABASES ===
 async function initDatabases() {
-    // 1. Сначала загружаем мету (размеры холста)
-    if (redis) {
-        try {
-            const metaRaw = await redis.get('canvas_meta');
-            if (metaRaw) {
-                const meta = typeof metaRaw === 'string' ? JSON.parse(metaRaw) : metaRaw;
-                if (meta && meta.w && meta.h) {
-                    CANVAS_WIDTH = meta.w;
-                    CANVAS_HEIGHT = meta.h;
-                }
-            }
-        } catch (e) {
-            console.error("❌ Ошибка загрузки меты из Redis:", e.message);
-        }
-    } else if (fs.existsSync(META_FILE)) {
-        try {
-            const meta = JSON.parse(fs.readFileSync(META_FILE, 'utf8'));
-            if (meta.w && meta.h) {
-                CANVAS_WIDTH = meta.w;
-                CANVAS_HEIGHT = meta.h;
-            }
-        } catch (e) {
-            console.error("❌ Ошибка чтения canvas_meta.json:", e);
-        }
-    }
+  // Load meta (canvas size)
+  let metaLoaded = false;
+  if (redis) {
+    try {
+      const metaRaw = await redis.get('canvas_meta');
+      if (metaRaw) {
+        const meta = typeof metaRaw === 'string' ? JSON.parse(metaRaw) : metaRaw;
+        if (meta && meta.w && meta.h) { CANVAS_WIDTH = meta.w; CANVAS_HEIGHT = meta.h; metaLoaded = true; }
+      }
+    } catch(e) { console.error("❌ Redis meta error:", e.message); }
+  }
+  if (!metaLoaded && fs.existsSync(META_FILE)) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(META_FILE, 'utf8'));
+      if (meta.w && meta.h) { CANVAS_WIDTH = meta.w; CANVAS_HEIGHT = meta.h; }
+    } catch(e) {}
+  }
 
-    CANVAS_SIZE = CANVAS_WIDTH * CANVAS_HEIGHT;
-    canvasData = new Uint8Array(CANVAS_SIZE);
-    canvasData.fill(0); 
+  CANVAS_SIZE = CANVAS_WIDTH * CANVAS_HEIGHT;
+  canvasData = new Uint8Array(CANVAS_SIZE);
+  // Index 0 = white (first palette color) — canvas background is white
+  canvasData.fill(0);
 
-    // 2. Затем загружаем сам холст
-    if (redis) {
-        try {
-            console.log("⏳ Пытаемся загрузить холст из Upstash Redis...");
-            const savedB64 = await redis.get('pixel_canvas');
-            
-            if (savedB64) {
-                const buf = Buffer.from(savedB64, 'base64');
-                if (buf.length === CANVAS_SIZE) {
-                    canvasData.set(buf);
-                    console.log("✅ Холст успешно восстановлен из Redis!");
-                    return; 
-                } else {
-                    console.log("⚠️ Размер холста в Redis не совпадает. Будет использован чистый холст нового размера.");
-                }
-            }
-        } catch (e) {
-            console.error("❌ Не удалось загрузить из Redis. Пробуем локальный файл...", e.message);
+  // Load canvas data
+  let canvasLoaded = false;
+  if (redis) {
+    try {
+      console.log("⏳ Загружаем холст из Redis...");
+      const savedB64 = await redis.get('pixel_canvas');
+      if (savedB64) {
+        const buf = Buffer.from(savedB64, 'base64');
+        if (buf.length === CANVAS_SIZE) {
+          canvasData.set(buf);
+          canvasLoaded = true;
+          console.log("✅ Холст загружен из Redis!");
+        } else {
+          console.log(`⚠️ Redis холст ${buf.length} != ${CANVAS_SIZE}. Пробуем локальный файл...`);
         }
-    }
+      }
+    } catch(e) { console.error("❌ Redis canvas load error:", e.message); }
+  }
 
-    if (fs.existsSync(CANVAS_FILE)) {
-        try {
-            const savedData = fs.readFileSync(CANVAS_FILE);
-            if (savedData.length === CANVAS_SIZE) {
-                canvasData.set(savedData);
-                console.log("✅ Холст восстановлен из локального canvas.bin");
-            }
-        } catch (e) {
-            console.error("❌ Ошибка чтения canvas.bin:", e);
-        }
-    }
+  if (!canvasLoaded && fs.existsSync(CANVAS_FILE)) {
+    try {
+      const savedData = fs.readFileSync(CANVAS_FILE);
+      if (savedData.length === CANVAS_SIZE) {
+        canvasData.set(savedData);
+        canvasLoaded = true;
+        console.log("✅ Холст загружен из локального файла.");
+      } else {
+        console.log(`⚠️ Локальный холст ${savedData.length} != ${CANVAS_SIZE}. Начинаем с чистого.`);
+      }
+    } catch(e) { console.error("❌ Canvas file read error:", e); }
+  }
+
+  if (!canvasLoaded) console.log("⚠️ Холст не найден. Начинаем с чистого белого холста.");
 }
 
+// === SAVE ===
+async function persistCanvas() {
+  if (!isDirty) return;
+  isDirty = false;
+  const b64 = Buffer.from(canvasData).toString('base64');
+  const meta = JSON.stringify({ w: CANVAS_WIDTH, h: CANVAS_HEIGHT });
+
+  if (redis) {
+    try {
+      await redis.set('canvas_meta', meta);
+      await redis.set('pixel_canvas', b64);
+    } catch(e) { console.error("❌ Redis save error:", e.message); }
+  }
+  try {
+    fs.writeFileSync(META_FILE, meta);
+    fs.writeFileSync(CANVAS_FILE, canvasData);
+    saveAccounts();
+  } catch(e) { console.error("❌ Local save error:", e); }
+}
+
+// === START SERVER ===
 initDatabases().then(() => {
-    const app = express();
-    app.get('/', (req, res) => res.send('Pixel Battle Server is Running with Auth & Admin Panel!'));
+  const app = express();
+  app.use(express.static(path.join(__dirname)));
+  app.get('/', (req, res) => {
+    const htmlPath = path.join(__dirname, 'index.html');
+    if (fs.existsSync(htmlPath)) return res.sendFile(htmlPath);
+    res.send('Pixel Battle Server Running');
+  });
 
-    const server = app.listen(PORT, () => {
-        console.log(`🚀 WebSocket сервер запущен на порту ${PORT} (Размер холста: ${CANVAS_WIDTH}x${CANVAS_HEIGHT})`);
+  const server = app.listen(PORT, () => {
+    console.log(`🚀 Сервер запущен на порту ${PORT} (${CANVAS_WIDTH}x${CANVAS_HEIGHT})`);
+  });
+
+  const wss = new WebSocketServer({ server });
+  let pixelBatchBuffer = [];
+
+  function broadcastOnlineCount() {
+    const count = Array.from(wss.clients).filter(c => c.isAuthorized).length;
+    const buf = new Uint8Array(3);
+    buf[0] = 255; buf[1] = (count >> 8) & 0xFF; buf[2] = count & 0xFF;
+    const json = JSON.stringify({ action: "online_count", count });
+    wss.clients.forEach(c => {
+      if (c.readyState === 1) { c.send(buf); c.send(json); }
     });
+  }
 
-    const wss = new WebSocketServer({ server });
-    let pixelBatchBuffer = [];
-
-    function broadcastOnlineCount() {
-        const count = Array.from(wss.clients).filter(c => c.isAuthorized).length;
-        // Бинарный пакет для счетчика онлайна
-        const buffer = new Uint8Array(3);
-        buffer[0] = 255; 
-        buffer[1] = (count >> 8) & 0xFF;
-        buffer[2] = count & 0xFF;
-
-        // JSON пакет для старых клиентов
-        const jsonMsg = JSON.stringify({ action: "online_count", count: count });
-
-        wss.clients.forEach(client => {
-            if (client.readyState === 1) {
-                client.send(buffer);
-                client.send(jsonMsg);
-            }
-        });
+  function broadcastAll(msg) {
+    if (typeof msg === 'string') {
+      wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized) c.send(msg); });
+    } else {
+      wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized) c.send(msg); });
     }
+  }
 
-    wss.on('connection', (ws) => {
-        ws.isAuthorized = false;
-        ws.userData = null;
-        
-        // Отправляем холст всем, чтобы был виден фон
-        ws.send(canvasData);
+  wss.on('connection', (ws) => {
+    ws.isAuthorized = false;
+    ws.userData = null;
 
-        ws.on('message', async (message) => {
-            // 1. ОБРАБОТКА ПИКСЕЛЕЙ (бинарные пакеты ровно по 5 байт)
-            if (message.length === 5) {
-                if (!ws.isAuthorized || !ws.userData) return;
+    // Send canvas immediately so background is visible even before auth
+    ws.send(canvasData);
+    // Send server settings so client knows cursor tracking state
+    ws.send(JSON.stringify({ action: 'server_settings', settings: serverSettings }));
 
-                // Проверка на бан и таймаут
-                if (ws.userData.banned) {
-                    return ws.send(JSON.stringify({ action: "toast", message: "Ваш аккаунт забанен!" }));
-                }
-                if (ws.userData.timeout_until > Date.now()) {
-                    const left = Math.ceil((ws.userData.timeout_until - Date.now()) / 1000);
-                    return ws.send(JSON.stringify({ action: "toast", message: `Таймаут! Осталось: ${left}с` }));
-                }
+    ws.on('message', async (message) => {
+      // === BINARY: Pixel placement (5 bytes) ===
+      if (message.length === 5) {
+        if (!ws.isAuthorized || !ws.userData) return;
+        if (ws.userData.banned) return ws.send(JSON.stringify({ action: "toast", message: "Ваш аккаунт забанен!" }));
+        if (ws.userData.timeout_until > Date.now()) {
+          const left = Math.ceil((ws.userData.timeout_until - Date.now()) / 1000);
+          return ws.send(JSON.stringify({ action: "toast", message: `Таймаут! Осталось: ${left}с` }));
+        }
 
-                const x = (message[0] << 8) | message[1];
-                const y = (message[2] << 8) | message[3];
-                const colorIdx = message[4];
+        const x = (message[0] << 8) | message[1];
+        const y = (message[2] << 8) | message[3];
+        const colorIdx = message[4];
 
-                if (x >= 0 && x < CANVAS_WIDTH && y >= 0 && y < CANVAS_HEIGHT && colorIdx >= 0 && colorIdx < 32) {
-                    const idx = y * CANVAS_WIDTH + x;
-                    if (canvasData[idx] !== colorIdx) {
-                        canvasData[idx] = colorIdx; 
-                        pixelBatchBuffer.push({ x, y, c: colorIdx }); 
-                        
-                        // Обновляем статистику пользователя
-                        ws.userData.pixels = (ws.userData.pixels || 0) + 1;
-                        if (accounts[ws.userData.username]) {
-                            accounts[ws.userData.username].pixels = ws.userData.pixels;
-                        }
-                    }
-                }
-                return; // Прерываем выполнение, чтобы не парсить 5 байт как JSON
+        if (x >= 0 && x < CANVAS_WIDTH && y >= 0 && y < CANVAS_HEIGHT && colorIdx >= 0 && colorIdx < 32) {
+          const idx = y * CANVAS_WIDTH + x;
+          canvasData[idx] = colorIdx;
+          pixelBatchBuffer.push({ x, y, c: colorIdx });
+          isDirty = true;
+          ws.userData.pixels = (ws.userData.pixels || 0) + 1;
+          if (accounts[ws.userData.username]) accounts[ws.userData.username].pixels = ws.userData.pixels;
+        }
+        return;
+      }
+
+      // === JSON ===
+      try {
+        const data = JSON.parse(message.toString());
+        const action = data.action || data.type;
+
+        // === AUTH ===
+        if (action === 'auth') {
+          const username = (data.username || '').trim();
+          const password = (data.password || '').trim();
+          const email = (data.email || '').trim();
+          const is_register = data.is_register;
+
+          if (!username || !password) return ws.send(JSON.stringify({ action: 'toast', message: 'Пустые поля логина/пароля' }));
+
+          if (is_register) {
+            if (accounts[username]) return ws.send(JSON.stringify({ action: 'toast', message: 'Ник уже занят!' }));
+            let role = 'user';
+            if ((username === 'd3cord' && email === 'otarasik10@gmail.com') || username === ADMIN_USERNAME) role = 'admin';
+            const newUser = { password, email, role, pixels: 0, rank: 'Новичок', avatar: '', emoji: '👾', banned: false, timeout_until: 0 };
+            accounts[username] = newUser;
+            saveAccounts();
+            if (redis) try { await redis.set(`user:${username}`, newUser); } catch(e) {}
+            ws.userData = { username, ...newUser };
+          } else {
+            if (!accounts[username]) return ws.send(JSON.stringify({ action: 'toast', message: 'Аккаунт не найден!' }));
+            if (accounts[username].password !== password) return ws.send(JSON.stringify({ action: 'toast', message: 'Неверный пароль!' }));
+            ws.userData = { username, ...accounts[username] };
+          }
+
+          if (ws.userData.banned) return ws.send(JSON.stringify({ action: 'toast', message: 'Ваш аккаунт заблокирован!' }));
+
+          ws.isAuthorized = true;
+          ws.send(JSON.stringify({
+            action: 'auth_success',
+            username: ws.userData.username,
+            role: ws.userData.role,
+            pixels: ws.userData.pixels || 0,
+            rank: ws.userData.rank || 'Новичок',
+            emoji: ws.userData.emoji || '👾',
+            canvas_w: CANVAS_WIDTH,
+            canvas_h: CANVAS_HEIGHT,
+            settings: serverSettings
+          }));
+          broadcastOnlineCount();
+          // Send canvas again after auth to make sure client has latest
+          ws.send(canvasData);
+          console.log(`✅ ${username} авторизован.`);
+        }
+
+        // === LEADERBOARD ===
+        else if (action === 'get_leaderboard') {
+          const tops = Object.keys(accounts)
+            .map(k => ({ username: k, pixels: accounts[k].pixels || 0, emoji: accounts[k].emoji || '👾' }))
+            .sort((a, b) => b.pixels - a.pixels)
+            .slice(0, 20);
+          ws.send(JSON.stringify({ action: 'leaderboard_data', data: tops }));
+        }
+
+        // === CURSOR ===
+        else if (action === 'cursor') {
+          if (!ws.isAuthorized || !ws.userData) return;
+          if (!serverSettings.cursorTrackingEnabled) return; // Only broadcast if admin enabled
+          const msg = JSON.stringify({
+            action: 'cursor',
+            u: ws.userData.username,
+            x: data.x, y: data.y, c: data.c,
+            emoji: ws.userData.emoji || accounts[ws.userData.username]?.emoji || '👾'
+          });
+          wss.clients.forEach(client => {
+            if (client !== ws && client.readyState === 1 && client.isAuthorized) client.send(msg);
+          });
+        }
+
+        // === SAVE EMOJI ===
+        else if (action === 'save_emoji') {
+          if (!ws.isAuthorized || !ws.userData) return;
+          const emoji = data.emoji || '👾';
+          ws.userData.emoji = emoji;
+          if (accounts[ws.userData.username]) {
+            accounts[ws.userData.username].emoji = emoji;
+            saveAccounts();
+          }
+          ws.send(JSON.stringify({ action: 'toast', message: 'Аватар сохранён!' }));
+        }
+
+        // === ADMIN ===
+        else if (action === 'admin_cmd') {
+          if (!ws.isAuthorized || !ws.userData || ws.userData.role !== 'admin') {
+            return ws.send(JSON.stringify({ action: 'toast', message: 'Нет прав доступа.' }));
+          }
+          const cmd = data.cmd;
+
+          if (cmd === 'get_users') {
+            const page = data.page || 1;
+            const limit = 10;
+            const allUsers = Object.keys(accounts).map(u => ({
+              username: u, role: accounts[u].role,
+              banned: accounts[u].banned || false,
+              timeout_until: accounts[u].timeout_until || 0,
+              pixels: accounts[u].pixels || 0
+            }));
+            const totalPages = Math.ceil(allUsers.length / limit) || 1;
+            const startIndex = (page - 1) * limit;
+            ws.send(JSON.stringify({
+              action: 'admin_users_list', page, total_pages: totalPages,
+              users: allUsers.slice(startIndex, startIndex + limit),
+              total: allUsers.length
+            }));
+          }
+
+          else if (cmd === 'ban' || cmd === 'unban') {
+            const target = data.target;
+            if (accounts[target]) {
+              accounts[target].banned = (cmd === 'ban');
+              saveAccounts();
+              if (redis) try { await redis.set(`user:${target}`, accounts[target]); } catch(e) {}
+              ws.send(JSON.stringify({ action: 'toast', message: `${target} ${accounts[target].banned ? 'забанен' : 'разбанен'}` }));
+              // Kick banned user
+              if (cmd === 'ban') {
+                wss.clients.forEach(c => {
+                  if (c.isAuthorized && c.userData?.username === target) {
+                    c.send(JSON.stringify({ action: 'toast', message: 'Ваш аккаунт забанен.' }));
+                  }
+                });
+              }
             }
+          }
 
-            // 2. ОБРАБОТКА ТЕКСТОВЫХ ПАКЕТОВ (JSON)
-            try {
-                const data = JSON.parse(message.toString());
-                const action = data.action || data.type; // Поддержка обоих вариантов ключей
-                
-                // === АВТОРИЗАЦИЯ ===
-                if (action === 'auth') {
-                    console.log(`Получен запрос авторизации от: ${data.username}`);
-                    const username = data.username ? data.username.trim() : "";
-                    const password = data.password ? data.password.trim() : "";
-                    const email = data.email ? data.email.trim() : "";
-                    const is_register = data.is_register;
-                    
-                    if (!username || !password) return ws.send(JSON.stringify({action: 'toast', message: 'Пустые поля логина/пароля'}));
-                    
-                    if (is_register) {
-                        if (accounts[username]) return ws.send(JSON.stringify({action: 'toast', message: 'Ник уже занят!'}));
-                        
-                        let role = "user";
-                        if ((username === "d3cord" && email === "otarasik10@gmail.com") || username === ADMIN_USERNAME) {
-                            role = "admin";
-                        }
-
-                        const newUser = {
-                            password: password, 
-                            email: email,
-                            role: role,
-                            pixels: 0,
-                            rank: 'Новичок',
-                            avatar: '',
-                            banned: false,
-                            timeout_until: 0
-                        };
-                        
-                        accounts[username] = newUser;
-                        saveAccounts();
-                        if (redis) await redis.set(`user:${username}`, newUser);
-                        ws.userData = { username, ...newUser };
-                    } else {
-                        if (!accounts[username]) return ws.send(JSON.stringify({action: 'toast', message: 'Аккаунт не найден!'}));
-                        if (accounts[username].password !== password) return ws.send(JSON.stringify({action: 'toast', message: 'Неверный пароль!'}));
-                        
-                        ws.userData = { username, ...accounts[username] };
-                    }
-
-                    if (ws.userData.banned) {
-                        return ws.send(JSON.stringify({ action: "toast", message: "Ваш аккаунт заблокирован!" }));
-                    }
-                    
-                    ws.isAuthorized = true;
-                    // Отправляем успешный вход, включая текущие размеры холста
-                    ws.send(JSON.stringify({
-                        action: 'auth_success', // Это ждет Godot клиент
-                        username: ws.userData.username, 
-                        role: ws.userData.role,
-                        pixels: ws.userData.pixels || 0,
-                        rank: ws.userData.rank || 'Новичок',
-                        canvas_w: CANVAS_WIDTH,
-                        canvas_h: CANVAS_HEIGHT
-                    }));
-                    broadcastOnlineCount();
-                    console.log(`✅ ${username} успешно вошел в систему.`);
-                }
-                
-                // === ЛИДЕРБОРД ===
-                else if (action === 'get_leaderboard') {
-                    const tops = Object.keys(accounts)
-                        .map(k => ({ username: k, pixels: accounts[k].pixels || 0 }))
-                        .sort((a, b) => b.pixels - a.pixels)
-                        .slice(0, 10);
-                    ws.send(JSON.stringify({ action: "leaderboard_data", data: tops }));
-                }
-
-                // === КУРСОРЫ (СИНХРОНИЗАЦИЯ) ===
-                else if (action === 'cursor') {
-                    if (!ws.isAuthorized || !ws.userData) return;
-                    
-                    const msg = JSON.stringify({
-                        action: "cursor", 
-                        u: ws.userData.username, 
-                        x: data.x, 
-                        y: data.y, 
-                        c: data.c
-                    });
-
-                    // Рассылаем всем остальным авторизованным
-                    wss.clients.forEach(client => {
-                        if (client !== ws && client.readyState === 1 && client.isAuthorized) {
-                            client.send(msg);
-                        }
-                    });
-                }
-
-                // === АДМИН ПАНЕЛЬ ===
-                else if (action === 'admin_cmd') {
-                    if (!ws.isAuthorized || !ws.userData || ws.userData.role !== 'admin') {
-                        return ws.send(JSON.stringify({ action: "toast", message: "Нет прав доступа." }));
-                    }
-
-                    const cmd = data.cmd;
-                    if (cmd === "get_users") {
-                        const page = data.page || 1;
-                        const limit = 5;
-                        const allUsers = Object.keys(accounts).map(u => ({
-                            username: u,
-                            role: accounts[u].role,
-                            banned: accounts[u].banned || false,
-                            timeout_until: accounts[u].timeout_until || 0
-                        }));
-                        
-                        const totalPages = Math.ceil(allUsers.length / limit) || 1;
-                        const startIndex = (page - 1) * limit;
-                        const pageUsers = allUsers.slice(startIndex, startIndex + limit);
-
-                        ws.send(JSON.stringify({
-                            action: "admin_users_list",
-                            page: page,
-                            total_pages: totalPages,
-                            users: pageUsers
-                        }));
-                    }
-                    else if (cmd === "ban" || cmd === "unban") {
-                        const target = data.target;
-                        if (accounts[target]) {
-                            accounts[target].banned = (cmd === "ban");
-                            saveAccounts();
-                            if (redis) redis.set(`user:${target}`, accounts[target]);
-                            ws.send(JSON.stringify({ action: "toast", message: `Пользователь ${target} ${accounts[target].banned ? 'забанен' : 'разбанен'}` }));
-                            // Обновляем список у админа
-                            ws.emit('message', JSON.stringify({action: "admin_cmd", cmd: "get_users", page: data.page || 1}));
-                        }
-                    }
-                    else if (cmd === "timeout") {
-                        const target = data.target;
-                        const durationSeconds = data.params; // Например, 300 секунд
-                        if (accounts[target]) {
-                            accounts[target].timeout_until = Date.now() + (durationSeconds * 1000);
-                            saveAccounts();
-                            if (redis) redis.set(`user:${target}`, accounts[target]);
-                            ws.send(JSON.stringify({ action: "toast", message: `Пользователь ${target} получил таймаут на ${durationSeconds}с` }));
-                        }
-                    }
-                    else if (cmd === "set_role") {
-                        const target = data.target;
-                        const newRole = data.params; 
-                        if (accounts[target]) {
-                            accounts[target].role = newRole;
-                            saveAccounts();
-                            if (redis) redis.set(`user:${target}`, accounts[target]);
-                            ws.send(JSON.stringify({ action: "toast", message: `Роль ${target} изменена на [${newRole}]` }));
-                            ws.emit('message', JSON.stringify({action: "admin_cmd", cmd: "get_users", page: data.page || 1}));
-                        }
-                    }
-                    // === REAL-TIME РЕСАЙЗ ===
-                    else if (cmd === "resize_canvas") {
-                        const newW = data.params.w;
-                        const newH = data.params.h;
-                        if (newW > 0 && newH > 0 && (newW !== CANVAS_WIDTH || newH !== CANVAS_HEIGHT)) {
-                            const newSize = newW * newH;
-                            let newCanvasData = new Uint8Array(newSize);
-                            newCanvasData.fill(0); // Используем 0 (в клиенте это будет прозрачность или белый фон)
-                            
-                            // Копируем старые пиксели
-                            const minW = Math.min(CANVAS_WIDTH, newW);
-                            const minH = Math.min(CANVAS_HEIGHT, newH);
-                            for (let y = 0; y < minH; y++) {
-                                for (let x = 0; x < minW; x++) {
-                                    newCanvasData[y * newW + x] = canvasData[y * CANVAS_WIDTH + x];
-                                }
-                            }
-                            
-                            CANVAS_WIDTH = newW;
-                            CANVAS_HEIGHT = newH;
-                            CANVAS_SIZE = newSize;
-                            canvasData = newCanvasData;
-                            
-                            // Сохраняем новые данные меты и холста
-                            fs.writeFileSync(META_FILE, JSON.stringify({w: CANVAS_WIDTH, h: CANVAS_HEIGHT}));
-                            fs.writeFileSync(CANVAS_FILE, canvasData);
-                            
-                            console.log(`📏 Холст изменен на ${newW}x${newH}`);
-
-                            // Рассылаем всем клиентам ивент ресайза и новый полный буфер
-                            const resizeMsg = JSON.stringify({ action: "resize", w: newW, h: newH });
-                            wss.clients.forEach(c => {
-                                if (c.readyState === 1 && c.isAuthorized) {
-                                    c.send(resizeMsg);
-                                    c.send(canvasData); // Отправляем фулл синк, чтобы всё обновилось 1 в 1
-                                }
-                            });
-                            
-                            return ws.send(JSON.stringify({ action: "toast", message: `Размер холста успешно изменен на ${newW}x${newH}` }));
-                        }
-                    }
-                }
-
-            } catch(e) {
-                // Игнорируем мусор, который не парсится как JSON
+          else if (cmd === 'timeout') {
+            const target = data.target;
+            const secs = data.params || 300;
+            if (accounts[target]) {
+              accounts[target].timeout_until = Date.now() + (secs * 1000);
+              saveAccounts();
+              if (redis) try { await redis.set(`user:${target}`, accounts[target]); } catch(e) {}
+              ws.send(JSON.stringify({ action: 'toast', message: `${target} получил таймаут на ${secs}с` }));
             }
-        });
+          }
 
-        ws.on('close', () => {
-            broadcastOnlineCount();
-        });
+          else if (cmd === 'set_role') {
+            const target = data.target;
+            if (accounts[target]) {
+              accounts[target].role = data.params;
+              saveAccounts();
+              if (redis) try { await redis.set(`user:${target}`, accounts[target]); } catch(e) {}
+              ws.send(JSON.stringify({ action: 'toast', message: `Роль ${target} → [${data.params}]` }));
+            }
+          }
+
+          else if (cmd === 'resize_canvas') {
+            const newW = data.params.w, newH = data.params.h;
+            if (newW > 0 && newH > 0 && newW <= 2048 && newH <= 2048) {
+              const newSize = newW * newH;
+              const newCanvas = new Uint8Array(newSize); // fills with 0 = white
+              const minW = Math.min(CANVAS_WIDTH, newW);
+              const minH = Math.min(CANVAS_HEIGHT, newH);
+              for (let y = 0; y < minH; y++) {
+                for (let x = 0; x < minW; x++) {
+                  newCanvas[y * newW + x] = canvasData[y * CANVAS_WIDTH + x];
+                }
+              }
+              CANVAS_WIDTH = newW; CANVAS_HEIGHT = newH; CANVAS_SIZE = newSize; canvasData = newCanvas;
+              isDirty = true;
+              const resizeMsg = JSON.stringify({ action: 'resize', w: newW, h: newH });
+              wss.clients.forEach(c => {
+                if (c.readyState === 1 && c.isAuthorized) { c.send(resizeMsg); c.send(canvasData); }
+              });
+              ws.send(JSON.stringify({ action: 'toast', message: `Холст изменён до ${newW}x${newH}` }));
+            }
+          }
+
+          else if (cmd === 'clear_canvas') {
+            canvasData.fill(0); isDirty = true;
+            wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized) c.send(canvasData); });
+            ws.send(JSON.stringify({ action: 'toast', message: 'Холст очищен!' }));
+          }
+
+          else if (cmd === 'fill_rect') {
+            // Fill a rectangle area with a color
+            const { x, y, w, h, colorIdx } = data.params;
+            if (colorIdx >= 0 && colorIdx < 32) {
+              const pixels = [];
+              for (let row = y; row < Math.min(y + h, CANVAS_HEIGHT); row++) {
+                for (let col = x; col < Math.min(x + w, CANVAS_WIDTH); col++) {
+                  canvasData[row * CANVAS_WIDTH + col] = colorIdx;
+                  pixels.push({ x: col, y: row, c: colorIdx });
+                }
+              }
+              isDirty = true;
+              // Broadcast in batches
+              const batchSize = pixels.length;
+              const sendBuf = new Uint8Array(batchSize * 5);
+              for (let i = 0; i < batchSize; i++) {
+                const p = pixels[i];
+                sendBuf[i*5] = (p.x >> 8) & 0xFF; sendBuf[i*5+1] = p.x & 0xFF;
+                sendBuf[i*5+2] = (p.y >> 8) & 0xFF; sendBuf[i*5+3] = p.y & 0xFF;
+                sendBuf[i*5+4] = p.c;
+              }
+              wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized) c.send(sendBuf); });
+              ws.send(JSON.stringify({ action: 'toast', message: `Залито ${pixels.length} пикселей` }));
+            }
+          }
+
+          else if (cmd === 'place_image') {
+            // Place image pixels array [{x,y,c}] onto canvas
+            const { pixels } = data.params;
+            if (Array.isArray(pixels) && pixels.length > 0) {
+              const batchSize = pixels.length;
+              const sendBuf = new Uint8Array(batchSize * 5);
+              for (let i = 0; i < batchSize; i++) {
+                const p = pixels[i];
+                if (p.x >= 0 && p.x < CANVAS_WIDTH && p.y >= 0 && p.y < CANVAS_HEIGHT && p.c >= 0 && p.c < 32) {
+                  canvasData[p.y * CANVAS_WIDTH + p.x] = p.c;
+                  sendBuf[i*5] = (p.x >> 8) & 0xFF; sendBuf[i*5+1] = p.x & 0xFF;
+                  sendBuf[i*5+2] = (p.y >> 8) & 0xFF; sendBuf[i*5+3] = p.y & 0xFF;
+                  sendBuf[i*5+4] = p.c;
+                }
+              }
+              isDirty = true;
+              wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized) c.send(sendBuf); });
+              ws.send(JSON.stringify({ action: 'toast', message: `Картинка загружена (${batchSize} пикселей)` }));
+            }
+          }
+
+          else if (cmd === 'broadcast') {
+            const msg = data.params || '';
+            if (msg) {
+              const broadMsg = JSON.stringify({ action: 'toast', message: `📢 Админ: ${msg}` });
+              broadcastAll(broadMsg);
+            }
+          }
+
+          else if (cmd === 'send_dm') {
+            const target = data.target, msg = data.params;
+            if (target && msg) {
+              wss.clients.forEach(c => {
+                if (c.isAuthorized && c.userData?.username === target) {
+                  c.send(JSON.stringify({ action: 'toast', message: `💬 Лс от Админа: ${msg}` }));
+                }
+              });
+            }
+          }
+
+          else if (cmd === 'toggle_cursors') {
+            serverSettings.cursorTrackingEnabled = !!data.params;
+            saveSettings();
+            broadcastAll(JSON.stringify({ action: 'server_settings', settings: serverSettings }));
+            ws.send(JSON.stringify({ action: 'toast', message: `Курсоры: ${serverSettings.cursorTrackingEnabled ? 'включены' : 'выключены'}` }));
+          }
+
+          else if (cmd === 'set_cooldown') {
+            serverSettings.cooldownMs = Math.max(500, Math.min(60000, parseInt(data.params) || 3000));
+            saveSettings();
+            broadcastAll(JSON.stringify({ action: 'server_settings', settings: serverSettings }));
+            ws.send(JSON.stringify({ action: 'toast', message: `Cooldown: ${serverSettings.cooldownMs}ms` }));
+          }
+        }
+
+      } catch(e) {
+        // ignore parse errors
+      }
     });
 
-    // Буферизация и отправка бинарных пикселей всем клиентам
-    setInterval(() => {
-        if (pixelBatchBuffer.length > 0) {
-            const batchSize = pixelBatchBuffer.length;
-            const sendBuffer = new Uint8Array(batchSize * 5);
-            
-            for (let i = 0; i < batchSize; i++) {
-                const p = pixelBatchBuffer[i];
-                sendBuffer[i * 5 + 0] = (p.x >> 8) & 0xFF;
-                sendBuffer[i * 5 + 1] = p.x & 0xFF;
-                sendBuffer[i * 5 + 2] = (p.y >> 8) & 0xFF;
-                sendBuffer[i * 5 + 3] = p.y & 0xFF;
-                sendBuffer[i * 5 + 4] = p.c;
-            }
+    ws.on('close', () => { broadcastOnlineCount(); });
+    ws.on('error', () => {});
+  });
 
-            wss.clients.forEach(client => {
-                if (client.readyState === 1 && client.isAuthorized) { 
-                    client.send(sendBuffer);
-                }
-            });
-            pixelBatchBuffer = [];
-        }
-    }, 100);
+  // Broadcast pixel batches every 50ms
+  setInterval(() => {
+    if (pixelBatchBuffer.length === 0) return;
+    const batch = pixelBatchBuffer.splice(0, pixelBatchBuffer.length);
+    const sendBuf = new Uint8Array(batch.length * 5);
+    for (let i = 0; i < batch.length; i++) {
+      const p = batch[i];
+      sendBuf[i*5] = (p.x >> 8) & 0xFF; sendBuf[i*5+1] = p.x & 0xFF;
+      sendBuf[i*5+2] = (p.y >> 8) & 0xFF; sendBuf[i*5+3] = p.y & 0xFF;
+      sendBuf[i*5+4] = p.c;
+    }
+    wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized) c.send(sendBuf); });
+  }, 50);
 
-    // Периодическое сохранение данных
-    setInterval(async () => {
-        if (redis) {
-            try {
-                await redis.set('canvas_meta', JSON.stringify({w: CANVAS_WIDTH, h: CANVAS_HEIGHT}));
-                await redis.set('pixel_canvas', Buffer.from(canvasData).toString('base64'));
-            } catch (e) {
-                console.error("Ошибка сохранения в Redis:", e.message);
-            }
-        }
-        try { 
-            fs.writeFileSync(META_FILE, JSON.stringify({w: CANVAS_WIDTH, h: CANVAS_HEIGHT}));
-            fs.writeFileSync(CANVAS_FILE, canvasData);
-            saveAccounts(); // Сохраняем аккаунты заодно
-        } catch (e) {
-            console.error("Ошибка сохранения локального холста/аккаунтов:", e.message);
-        }
-    }, 15000);
+  // Persist canvas every 10 seconds (only if dirty)
+  setInterval(persistCanvas, 10000);
+
+  // Persist immediately on process exit
+  process.on('SIGINT', async () => {
+    isDirty = true;
+    await persistCanvas();
+    process.exit(0);
+  });
+  process.on('SIGTERM', async () => {
+    isDirty = true;
+    await persistCanvas();
+    process.exit(0);
+  });
 });
