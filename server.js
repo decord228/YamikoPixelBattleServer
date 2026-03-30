@@ -6,15 +6,16 @@ const { Redis } = require('@upstash/redis');
 
 // === НАСТРОЙКИ СЕРВЕРА ===
 const PORT = process.env.PORT || 3000;
-const CANVAS_WIDTH = 256;
-const CANVAS_HEIGHT = 256;
-const CANVAS_SIZE = CANVAS_WIDTH * CANVAS_HEIGHT;
 const CANVAS_FILE = path.join(__dirname, 'canvas.bin');
+const META_FILE = path.join(__dirname, 'canvas_meta.json');
 const ACCOUNTS_FILE = path.join(__dirname, 'accounts.json');
 const ADMIN_USERNAME = "Yamiko"; // Резервный админ
 
-let canvasData = new Uint8Array(CANVAS_SIZE);
-canvasData.fill(0); 
+// Динамические параметры размера холста
+let CANVAS_WIDTH = 256;
+let CANVAS_HEIGHT = 256;
+let CANVAS_SIZE = CANVAS_WIDTH * CANVAS_HEIGHT;
+let canvasData = null;
 
 // === БАЗА АККАУНТОВ (Локальный кэш для быстрой работы админки) ===
 let accounts = {};
@@ -46,6 +47,37 @@ if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) 
 }
 
 async function initDatabases() {
+    // 1. Сначала загружаем мету (размеры холста)
+    if (redis) {
+        try {
+            const metaRaw = await redis.get('canvas_meta');
+            if (metaRaw) {
+                const meta = typeof metaRaw === 'string' ? JSON.parse(metaRaw) : metaRaw;
+                if (meta && meta.w && meta.h) {
+                    CANVAS_WIDTH = meta.w;
+                    CANVAS_HEIGHT = meta.h;
+                }
+            }
+        } catch (e) {
+            console.error("❌ Ошибка загрузки меты из Redis:", e.message);
+        }
+    } else if (fs.existsSync(META_FILE)) {
+        try {
+            const meta = JSON.parse(fs.readFileSync(META_FILE, 'utf8'));
+            if (meta.w && meta.h) {
+                CANVAS_WIDTH = meta.w;
+                CANVAS_HEIGHT = meta.h;
+            }
+        } catch (e) {
+            console.error("❌ Ошибка чтения canvas_meta.json:", e);
+        }
+    }
+
+    CANVAS_SIZE = CANVAS_WIDTH * CANVAS_HEIGHT;
+    canvasData = new Uint8Array(CANVAS_SIZE);
+    canvasData.fill(0); 
+
+    // 2. Затем загружаем сам холст
     if (redis) {
         try {
             console.log("⏳ Пытаемся загрузить холст из Upstash Redis...");
@@ -57,6 +89,8 @@ async function initDatabases() {
                     canvasData.set(buf);
                     console.log("✅ Холст успешно восстановлен из Redis!");
                     return; 
+                } else {
+                    console.log("⚠️ Размер холста в Redis не совпадает. Будет использован чистый холст нового размера.");
                 }
             }
         } catch (e) {
@@ -82,7 +116,7 @@ initDatabases().then(() => {
     app.get('/', (req, res) => res.send('Pixel Battle Server is Running with Auth & Admin Panel!'));
 
     const server = app.listen(PORT, () => {
-        console.log(`🚀 WebSocket сервер запущен на порту ${PORT}`);
+        console.log(`🚀 WebSocket сервер запущен на порту ${PORT} (Размер холста: ${CANVAS_WIDTH}x${CANVAS_HEIGHT})`);
     });
 
     const wss = new WebSocketServer({ server });
@@ -198,18 +232,49 @@ initDatabases().then(() => {
                     }
                     
                     ws.isAuthorized = true;
-                    // Отправляем успешный вход
+                    // Отправляем успешный вход, включая текущие размеры холста
                     ws.send(JSON.stringify({
                         action: 'auth_success', // Это ждет Godot клиент
                         username: ws.userData.username, 
                         role: ws.userData.role,
                         pixels: ws.userData.pixels || 0,
-                        rank: ws.userData.rank || 'Новичок'
+                        rank: ws.userData.rank || 'Новичок',
+                        canvas_w: CANVAS_WIDTH,
+                        canvas_h: CANVAS_HEIGHT
                     }));
                     broadcastOnlineCount();
                     console.log(`✅ ${username} успешно вошел в систему.`);
                 }
                 
+                // === ЛИДЕРБОРД ===
+                else if (action === 'get_leaderboard') {
+                    const tops = Object.keys(accounts)
+                        .map(k => ({ username: k, pixels: accounts[k].pixels || 0 }))
+                        .sort((a, b) => b.pixels - a.pixels)
+                        .slice(0, 10);
+                    ws.send(JSON.stringify({ action: "leaderboard_data", data: tops }));
+                }
+
+                // === КУРСОРЫ (СИНХРОНИЗАЦИЯ) ===
+                else if (action === 'cursor') {
+                    if (!ws.isAuthorized || !ws.userData) return;
+                    
+                    const msg = JSON.stringify({
+                        action: "cursor", 
+                        u: ws.userData.username, 
+                        x: data.x, 
+                        y: data.y, 
+                        c: data.c
+                    });
+
+                    // Рассылаем всем остальным авторизованным
+                    wss.clients.forEach(client => {
+                        if (client !== ws && client.readyState === 1 && client.isAuthorized) {
+                            client.send(msg);
+                        }
+                    });
+                }
+
                 // === АДМИН ПАНЕЛЬ ===
                 else if (action === 'admin_cmd') {
                     if (!ws.isAuthorized || !ws.userData || ws.userData.role !== 'admin') {
@@ -270,6 +335,47 @@ initDatabases().then(() => {
                             ws.emit('message', JSON.stringify({action: "admin_cmd", cmd: "get_users", page: data.page || 1}));
                         }
                     }
+                    // === REAL-TIME РЕСАЙЗ ===
+                    else if (cmd === "resize_canvas") {
+                        const newW = data.params.w;
+                        const newH = data.params.h;
+                        if (newW > 0 && newH > 0 && (newW !== CANVAS_WIDTH || newH !== CANVAS_HEIGHT)) {
+                            const newSize = newW * newH;
+                            let newCanvasData = new Uint8Array(newSize);
+                            newCanvasData.fill(0); // Используем 0 (в клиенте это будет прозрачность или белый фон)
+                            
+                            // Копируем старые пиксели
+                            const minW = Math.min(CANVAS_WIDTH, newW);
+                            const minH = Math.min(CANVAS_HEIGHT, newH);
+                            for (let y = 0; y < minH; y++) {
+                                for (let x = 0; x < minW; x++) {
+                                    newCanvasData[y * newW + x] = canvasData[y * CANVAS_WIDTH + x];
+                                }
+                            }
+                            
+                            CANVAS_WIDTH = newW;
+                            CANVAS_HEIGHT = newH;
+                            CANVAS_SIZE = newSize;
+                            canvasData = newCanvasData;
+                            
+                            // Сохраняем новые данные меты и холста
+                            fs.writeFileSync(META_FILE, JSON.stringify({w: CANVAS_WIDTH, h: CANVAS_HEIGHT}));
+                            fs.writeFileSync(CANVAS_FILE, canvasData);
+                            
+                            console.log(`📏 Холст изменен на ${newW}x${newH}`);
+
+                            // Рассылаем всем клиентам ивент ресайза и новый полный буфер
+                            const resizeMsg = JSON.stringify({ action: "resize", w: newW, h: newH });
+                            wss.clients.forEach(c => {
+                                if (c.readyState === 1 && c.isAuthorized) {
+                                    c.send(resizeMsg);
+                                    c.send(canvasData); // Отправляем фулл синк, чтобы всё обновилось 1 в 1
+                                }
+                            });
+                            
+                            return ws.send(JSON.stringify({ action: "toast", message: `Размер холста успешно изменен на ${newW}x${newH}` }));
+                        }
+                    }
                 }
 
             } catch(e) {
@@ -310,12 +416,14 @@ initDatabases().then(() => {
     setInterval(async () => {
         if (redis) {
             try {
+                await redis.set('canvas_meta', JSON.stringify({w: CANVAS_WIDTH, h: CANVAS_HEIGHT}));
                 await redis.set('pixel_canvas', Buffer.from(canvasData).toString('base64'));
             } catch (e) {
                 console.error("Ошибка сохранения в Redis:", e.message);
             }
         }
         try { 
+            fs.writeFileSync(META_FILE, JSON.stringify({w: CANVAS_WIDTH, h: CANVAS_HEIGHT}));
             fs.writeFileSync(CANVAS_FILE, canvasData);
             saveAccounts(); // Сохраняем аккаунты заодно
         } catch (e) {
