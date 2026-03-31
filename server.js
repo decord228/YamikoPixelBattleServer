@@ -117,6 +117,7 @@ if (mongoose) {
     clan:              { type: String, default: '' },
     inventory:         { type: Object, default: {} },
     upgrades:          { type: [String], default: [] },
+    active_stencil:    { type: Object, default: null }, // Сохраненный трафарет
   }, { timestamps: true, autoIndex: false });
 
   const ClanSchema = new mongoose.Schema({
@@ -289,7 +290,6 @@ async function initDatabases() {
     if (fs.existsSync(af)) {
       try { accounts = JSON.parse(fs.readFileSync(af, 'utf8')); } catch(e) {}
     }
-    // Хардкод-фикс для d3cord
     if (accounts['d3cord']?.email === 'otarasik10@gmail.com') accounts['d3cord'].role = 'admin';
   }
 
@@ -417,7 +417,6 @@ initDatabases().then(() => {
   const wss = new WebSocketServer({ server });
   let pixelBatchBuffer = [];
 
-  // ── BROADCAST HELPERS ────────────────────────────────────
   function broadcastOnlineCount() {
     const count = Array.from(wss.clients).filter(c => c.isAuthorized).length;
     const buf   = new Uint8Array(3);
@@ -437,7 +436,6 @@ initDatabases().then(() => {
     });
   }
 
-  // ── PIXEL BROADCAST LOOP (50ms batch) ───────────────────
   setInterval(() => {
     if (!pixelBatchBuffer.length) return;
     const batch  = pixelBatchBuffer.splice(0);
@@ -469,7 +467,6 @@ initDatabases().then(() => {
     return false;
   }
 
-  // ── ПРИМЕНЕНИЕ ПРЕДМЕТА (ИСПРАВЛЕНО) ───────────────────
   async function useConsumable(ws, itemId, reqData) {
     const acc = ws.userData;
     const inv = acc.inventory || {};
@@ -477,7 +474,6 @@ initDatabases().then(() => {
       ws.send(JSON.stringify({ action:'toast', message:'Предмет не найден в инвентаре' })); return;
     }
 
-    // Берем координаты клика из запроса (обязательно!)
     const px = reqData?.x !== undefined ? reqData.x : (acc._lastPixel?.x ?? Math.floor(CANVAS_WIDTH/2));
     const py = reqData?.y !== undefined ? reqData.y : (acc._lastPixel?.y ?? Math.floor(CANVAS_HEIGHT/2));
     const reqColor = reqData?.color !== undefined ? reqData.color : (acc._lastColor ?? 0);
@@ -488,6 +484,23 @@ initDatabases().then(() => {
         const nx = px+dx, ny = py+dy;
         if (nx>=0&&nx<CANVAS_WIDTH&&ny>=0&&ny<CANVAS_HEIGHT) {
           canvasData[ny*CANVAS_WIDTH+nx] = reqColor;
+          pixels.push({x:nx, y:ny, c:reqColor});
+        }
+      }
+    } else if (itemId === 'rainbow_5x5') {
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+        const nx = px+dx, ny = py+dy;
+        if (nx>=0&&nx<CANVAS_WIDTH&&ny>=0&&ny<CANVAS_HEIGHT) {
+          const rc = Math.floor(Math.random()*32); 
+          canvasData[ny*CANVAS_WIDTH+nx] = rc;
+          pixels.push({x:nx, y:ny, c:rc});
+        }
+      }
+    } else if (itemId === 'eraser_10x10') {
+      for (let dy = -4; dy <= 5; dy++) for (let dx = -4; dx <= 5; dx++) {
+        const nx = px+dx, ny = py+dy;
+        if (nx>=0&&nx<CANVAS_WIDTH&&ny>=0&&ny<CANVAS_HEIGHT) {
+          canvasData[ny*CANVAS_WIDTH+nx] = 0;
           pixels.push({x:nx, y:ny, c:reqColor});
         }
       }
@@ -628,7 +641,7 @@ initDatabases().then(() => {
             if (existing) { ws.send(JSON.stringify({ action:'toast', message:'Ник уже занят!' })); return; }
             let role = 'user';
             if ((username === 'd3cord' && email === 'otarasik10@gmail.com') || username === ADMIN_USERNAME) role = 'admin';
-            const newUser = { username, password, email, role, pixels: 0, rank: 'Новичок', emoji: '👾', banned: false, timeout_until: 0, coins: 0, clan: '', inventory: {}, upgrades: [] };
+            const newUser = { username, password, email, role, pixels: 0, rank: 'Новичок', emoji: '👾', banned: false, timeout_until: 0, coins: 0, clan: '', inventory: {}, upgrades: [], active_stencil: null };
             await dbSaveAccount(username, newUser);
             ws.userData = { ...newUser };
           } else {
@@ -663,9 +676,16 @@ initDatabases().then(() => {
             canvas_w:  CANVAS_WIDTH,
             canvas_h:  CANVAS_HEIGHT,
             settings:  serverSettings,
+            stencil:   ws.userData.active_stencil
           }));
           broadcastOnlineCount();
           ws.send(canvasData);
+        }
+
+        else if (action === 'save_personal_stencil') {
+          if (!ws.isAuthorized) return;
+          await dbSaveAccount(ws.userData.username, { active_stencil: data.stencil });
+          ws.userData.active_stencil = data.stencil;
         }
 
         else if (action === 'get_leaderboard') {
@@ -875,9 +895,9 @@ initDatabases().then(() => {
         // ══════════════════════════════════════════════════
         //  SHOP / INVENTORY
         // ══════════════════════════════════════════════════
-        else if (action === 'buy_item') {
+        else if (action === 'shop_buy' || action === 'buy_item') {
           if (!ws.isAuthorized) return;
-          const itemId = data.item_id;
+          const itemId = data.item_id || data.itemId;
           const item = SHOP_ITEMS.find(i => i.id === itemId);
           if (!item) { ws.send(JSON.stringify({ action:'toast', message:'Предмет не найден' })); return; }
 
@@ -918,7 +938,6 @@ initDatabases().then(() => {
           ws.send(JSON.stringify({ action:'purchase_update', purchased_items: clientItems, coins: newCoins, message:`✅ Куплено: ${item.title}` }));
         }
 
-        // Передаём 'data', чтобы получить координаты x/y клика клиента
         else if (action === 'use_item') {
           if (!ws.isAuthorized) return;
           await useConsumable(ws, data.item_id || data.itemId, data);
@@ -1022,6 +1041,59 @@ initDatabases().then(() => {
             canvasData.fill(0); isDirty = true;
             wss.clients.forEach(c => { if (c.readyState===1&&c.isAuthorized) c.send(canvasData); });
             ws.send(JSON.stringify({ action:'toast', message:'Холст очищен!' }));
+          }
+
+          else if (cmd === 'draw_shape') {
+            const { type, params } = data;
+            const cidx = data.colorIdx || 0;
+            const pixelsToUpdate = [];
+
+            if (type === 'rect') {
+                for (let yy = params.y; yy < params.y + params.h; yy++) {
+                    for (let xx = params.x; xx < params.x + params.w; xx++) {
+                        if (xx >= 0 && xx < CANVAS_WIDTH && yy >= 0 && yy < CANVAS_HEIGHT) {
+                            if (params.filled || yy === params.y || yy === params.y + params.h - 1 || xx === params.x || xx === params.x + params.w - 1) {
+                                canvasData[yy * CANVAS_WIDTH + xx] = cidx;
+                                pixelsToUpdate.push({x: xx, y: yy, c: cidx});
+                            }
+                        }
+                    }
+                }
+            } else if (type === 'circle') {
+                for (let yy = params.cy - params.r; yy <= params.cy + params.r; yy++) {
+                    for (let xx = params.cx - params.r; xx <= params.cx + params.r; xx++) {
+                        if (xx >= 0 && xx < CANVAS_WIDTH && yy >= 0 && yy < CANVAS_HEIGHT) {
+                            let dist = Math.hypot(xx - params.cx, yy - params.cy);
+                            if (params.filled ? dist <= params.r : Math.abs(dist - params.r) < 1) {
+                                canvasData[yy * CANVAS_WIDTH + xx] = cidx;
+                                pixelsToUpdate.push({x: xx, y: yy, c: cidx});
+                            }
+                        }
+                    }
+                }
+            } else if (type === 'line') {
+                let x0 = params.x0, y0 = params.y0, x1 = params.x1, y1 = params.y1;
+                let dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0);
+                let sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+                let err = dx + dy, e2;
+
+                while (true) {
+                    if (x0 >= 0 && x0 < CANVAS_WIDTH && y0 >= 0 && y0 < CANVAS_HEIGHT) {
+                        canvasData[y0 * CANVAS_WIDTH + x0] = cidx;
+                        pixelsToUpdate.push({x: x0, y: y0, c: cidx});
+                    }
+                    if (x0 === x1 && y0 === y1) break;
+                    e2 = 2 * err;
+                    if (e2 >= dy) { err += dy; x0 += sx; }
+                    if (e2 <= dx) { err += dx; y0 += sy; }
+                }
+            }
+
+            if (pixelsToUpdate.length > 0) {
+                isDirty = true;
+                sendPixelBulk(pixelsToUpdate);
+                ws.send(JSON.stringify({action: 'toast', message: `Фигура нарисована (${pixelsToUpdate.length} px)`}));
+            }
           }
 
           else if (cmd === 'move_area') {
