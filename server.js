@@ -1,8 +1,9 @@
 'use strict';
 
 // ════════════════════════════════════════════════════════════
-//  PIXEL BATTLE — SERVER v2.0 (FIXED)
-//  Исправлена экономика, магазин и синхронизация пакетов
+//  PIXEL BATTLE — SERVER v2.0
+//  Рефакторинг + новые фичи: VIP-роль, магазин, кулдаун-слайдер,
+//  сохранение move_area, превью изображений, глобальный чат
 // ════════════════════════════════════════════════════════════
 
 const express    = require('express');
@@ -78,15 +79,13 @@ function getRank(pixels) {
 // ── SHOP CATALOGUE ─────────────────────────────────────────
 const SHOP_ITEMS = [
   // USER
-  { id: 'stencil_auto_color', title:'Авто-цвет трафарета',   desc:'При наведении на трафарет авто-выбирает ближайший цвет из палитры.',         cost:100,  role:'user',  type:'upgrade' },
+  { id: 'stencil_auto_1', title:'Авто-подбор цветов Ур.1', cost:100, role:'user', type:'upgrade' },
+  { id: 'stencil_auto_2', title:'Авто-подбор цветов Ур.2', cost:300, role:'user', type:'upgrade' },
   // VIP
-  { id: 'bomb_3x3',           title:'🎨 Цветная бомба 3×3',  desc:'Заливает квадрат 3×3 пикселя выбранным цветом мгновенно.',                    cost:50,   role:'vip',   type:'consumable' },
-  { id: 'nuke_5x5',           title:'💥 Мега-бомба 5×5',     desc:'Заливает квадрат 5×5 пикселей выбранным цветом.',                             cost:120,  role:'vip',   type:'consumable' },
-  { id: 'rainbow_line',       title:'🌈 Радужная линия',      desc:'Рисует горизонтальную линию из 8 пикселей случайными цветами палитры.',       cost:80,   role:'vip',   type:'consumable' },
-  { id: 'cooldown_skip',      title:'⚡ Сброс кулдауна',      desc:'Мгновенно снимает текущий кулдаун (одноразовый предмет).',                    cost:60,   role:'vip',   type:'consumable' },
-  // ADMIN (тестовые)
-  { id: 'godmode_paint',      title:'🛡️ Краска Бога',         desc:'[Тест] Ставит 100 случайных пикселей по всему холсту мгновенно.',             cost:0,    role:'admin', type:'consumable' },
-  { id: 'canvas_rainbow',     title:'🌀 Радуга Холста',       desc:'[Тест] Рисует диагональные полосы всех цветов палитры поперёк холста.',       cost:0,    role:'admin', type:'consumable' },
+  { id: 'bomb_3x3',       title:'Цветная бомбочка 3×3',    cost:50,  role:'vip',  type:'consumable' },
+  { id: 'rainbow_5x5',    title:'Радужный взрыв 5×5',      cost:80,  role:'vip',  type:'consumable' },
+  { id: 'eraser_10x10',   title:'Большой Ластик 10×10',    cost:120, role:'vip',  type:'consumable' },
+  { id: 'mirror_stamp',   title:'Зеркальный штамп',        cost:200, role:'vip',  type:'consumable' },
 ];
 
 // ── DB TIMEOUT HELPER ──────────────────────────────────────
@@ -452,7 +451,6 @@ initDatabases().then(() => {
     wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized) c.send(buf); });
   }, 50);
 
-  // ── HELPER: SEND PIXEL UPDATE ────────────────────────────
   function sendPixelBulk(pixels) {
     const buf = new Uint8Array(pixels.length * 5);
     for (let i = 0; i < pixels.length; i++) {
@@ -464,7 +462,6 @@ initDatabases().then(() => {
     wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized) c.send(buf); });
   }
 
-  // ── HELPER: CHECK ROLE ───────────────────────────────────
   function hasRole(userData, role) {
     if (userData.role === 'admin') return true;
     if (role === 'vip' && userData.role === 'vip') return true;
@@ -472,62 +469,68 @@ initDatabases().then(() => {
     return false;
   }
 
-  // ── CONSUMABLE EFFECT ────────────────────────────────────
-  async function useConsumable(ws, itemId) {
+  // ── ПРИМЕНЕНИЕ ПРЕДМЕТА (ИСПРАВЛЕНО) ───────────────────
+  async function useConsumable(ws, itemId, reqData) {
     const acc = ws.userData;
     const inv = acc.inventory || {};
     if (!inv[itemId] || inv[itemId] <= 0) {
       ws.send(JSON.stringify({ action:'toast', message:'Предмет не найден в инвентаре' })); return;
     }
-    const px = acc._lastPixel?.x ?? Math.floor(CANVAS_WIDTH/2);
-    const py = acc._lastPixel?.y ?? Math.floor(CANVAS_HEIGHT/2);
+
+    // Берем координаты клика из запроса (обязательно!)
+    const px = reqData?.x !== undefined ? reqData.x : (acc._lastPixel?.x ?? Math.floor(CANVAS_WIDTH/2));
+    const py = reqData?.y !== undefined ? reqData.y : (acc._lastPixel?.y ?? Math.floor(CANVAS_HEIGHT/2));
+    const reqColor = reqData?.color !== undefined ? reqData.color : (acc._lastColor ?? 0);
     let pixels = [];
 
     if (itemId === 'bomb_3x3') {
-      const cc = acc._lastColor ?? 0;
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
         const nx = px+dx, ny = py+dy;
         if (nx>=0&&nx<CANVAS_WIDTH&&ny>=0&&ny<CANVAS_HEIGHT) {
-          canvasData[ny*CANVAS_WIDTH+nx] = cc;
-          pixels.push({x:nx, y:ny, c:cc});
+          canvasData[ny*CANVAS_WIDTH+nx] = reqColor;
+          pixels.push({x:nx, y:ny, c:reqColor});
         }
       }
-    } else if (itemId === 'nuke_5x5') {
-      const cc = acc._lastColor ?? 0;
+    } else if (itemId === 'rainbow_5x5') {
       for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
         const nx = px+dx, ny = py+dy;
         if (nx>=0&&nx<CANVAS_WIDTH&&ny>=0&&ny<CANVAS_HEIGHT) {
-          canvasData[ny*CANVAS_WIDTH+nx] = cc;
-          pixels.push({x:nx, y:ny, c:cc});
+          const rc = Math.floor(Math.random()*32); // Случайный цвет палитры
+          canvasData[ny*CANVAS_WIDTH+nx] = rc;
+          pixels.push({x:nx, y:ny, c:rc});
         }
       }
-    } else if (itemId === 'rainbow_line') {
-      for (let i = 0; i < 8; i++) {
-        const nx = Math.min(CANVAS_WIDTH-1, px+i);
-        const cc = i % 32;
-        canvasData[py*CANVAS_WIDTH+nx] = cc;
-        pixels.push({x:nx, y:py, c:cc});
-      }
-    } else if (itemId === 'cooldown_skip') {
-      ws.send(JSON.stringify({ action:'cooldown_reset' }));
-    } else if (itemId === 'godmode_paint') {
-      for (let i = 0; i < 100; i++) {
-        const rx = Math.floor(Math.random()*CANVAS_WIDTH);
-        const ry = Math.floor(Math.random()*CANVAS_HEIGHT);
-        const rc = Math.floor(Math.random()*32);
-        canvasData[ry*CANVAS_WIDTH+rx] = rc;
-        pixels.push({x:rx, y:ry, c:rc});
-      }
-    } else if (itemId === 'canvas_rainbow') {
-      for (let y = 0; y < CANVAS_HEIGHT; y++) {
-        const cc = y % 32;
-        for (let x = 0; x < CANVAS_WIDTH; x++) {
-          canvasData[y*CANVAS_WIDTH+x] = cc;
-          pixels.push({x, y, c:cc});
+    } else if (itemId === 'eraser_10x10') {
+      for (let dy = -4; dy <= 5; dy++) for (let dx = -4; dx <= 5; dx++) {
+        const nx = px+dx, ny = py+dy;
+        if (nx>=0&&nx<CANVAS_WIDTH&&ny>=0&&ny<CANVAS_HEIGHT) {
+          canvasData[ny*CANVAS_WIDTH+nx] = 0; // Белый
+          pixels.push({x:nx, y:ny, c:0});
         }
+      }
+    } else if (itemId === 'mirror_stamp') {
+      const temp = [];
+      // Копируем квадрат 5x5
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          const nx = px+dx, ny = py+dy;
+          if (nx>=0&&nx<CANVAS_WIDTH&&ny>=0&&ny<CANVAS_HEIGHT) {
+            temp.push({ dx, dy, c: canvasData[ny*CANVAS_WIDTH+nx] });
+          }
+        }
+      }
+      // Отражаем по горизонтали и применяем
+      for (const p of temp) {
+         const mx = px - p.dx; // Миррор по X
+         const my = py + p.dy;
+         if (mx>=0&&mx<CANVAS_WIDTH&&my>=0&&my<CANVAS_HEIGHT) {
+            canvasData[my*CANVAS_WIDTH+mx] = p.c;
+            pixels.push({x:mx, y:my, c:p.c});
+         }
       }
     }
 
+    // Списываем предмет из инвентаря
     inv[itemId]--;
     if (inv[itemId] <= 0) delete inv[itemId];
     acc.inventory = inv;
@@ -539,11 +542,12 @@ initDatabases().then(() => {
       sendPixelBulk(pixels);
     }
     
+    // Обновляем клиент
     let clientItems = [...acc.upgrades];
     for (let k in inv) {
       for (let i = 0; i < inv[k]; i++) clientItems.push(k);
     }
-    ws.send(JSON.stringify({ action:'toast', message:`✅ Использован: ${itemId}`, type:'success' }));
+    ws.send(JSON.stringify({ action:'toast', message:`✅ Предмет успешно использован!`, type:'success' }));
     ws.send(JSON.stringify({ action:'purchase_update', purchased_items: clientItems }));
   }
 
@@ -585,8 +589,6 @@ initDatabases().then(() => {
 
           const prevCoins = acc.coins || 0;
           acc.pixels = (acc.pixels || 0) + 1;
-          
-          // ФИКС ВАЛЮТЫ: Инкрементируем баланс вместо жесткого пересчета
           acc.coins = (acc.coins || 0) + COINS_PER_PIXEL;
           acc.rank  = getRank(acc.pixels).name;
 
@@ -611,7 +613,6 @@ initDatabases().then(() => {
         const data   = JSON.parse(message.toString());
         const action = data.action || data.type;
 
-        // ── AUTH ──────────────────────────────────────────
         if (action === 'auth') {
           const username    = (data.username || '').trim();
           const password    = (data.password || '').trim();
@@ -644,7 +645,6 @@ initDatabases().then(() => {
           ws.userData.inventory = ws.userData.inventory || {};
           ws.userData.upgrades  = ws.userData.upgrades  || [];
 
-          // Собираем плоский массив предметов для клиента
           let clientItems = [...ws.userData.upgrades];
           for (let k in ws.userData.inventory) {
             for (let i = 0; i < ws.userData.inventory[k]; i++) clientItems.push(k);
@@ -713,9 +713,6 @@ initDatabases().then(() => {
           broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_chat_message', msg }), null);
         }
 
-        // ══════════════════════════════════════════════════
-        //  CLAN ACTIONS
-        // ══════════════════════════════════════════════════
         else if (action === 'clan_create') {
           if (!ws.isAuthorized) return;
           const { name, tag, description } = data;
@@ -760,7 +757,6 @@ initDatabases().then(() => {
           ws.send(JSON.stringify({ action:'toast', message:`Заявка в "${name}" отправлена` }));
         }
 
-        // ФИКС: Обработка получения заявок в клан
         else if (action === 'clan_get_requests') {
           if (!ws.isAuthorized || !ws.userData.clan) return;
           const clan = await dbGetClan(ws.userData.clan);
@@ -769,7 +765,6 @@ initDatabases().then(() => {
           }
         }
 
-        // ФИКС: Ожидаем username, а не target
         else if (action === 'clan_accept_request') {
           if (!ws.isAuthorized || !ws.userData.clan) return;
           const target = data.username;
@@ -790,7 +785,6 @@ initDatabases().then(() => {
           ws.send(JSON.stringify({ action:'clan_requests', requests }));
         }
 
-        // ФИКС: Добавлен обработчик отказа заявки
         else if (action === 'clan_deny_request') {
           if (!ws.isAuthorized || !ws.userData.clan) return;
           const target = data.username;
@@ -804,7 +798,6 @@ initDatabases().then(() => {
 
         else if (action === 'clan_kick') {
           if (!ws.isAuthorized || !ws.userData.clan) return;
-          const { target } = data; // ui.js sends username: target - wait, ui.js sends `username`!
           const targetUser = data.username || data.target;
           const clan = await dbGetClan(ws.userData.clan);
           if (!clan || clan.leader !== ws.userData.username || targetUser === ws.userData.username) return;
@@ -820,7 +813,6 @@ initDatabases().then(() => {
           ws.send(JSON.stringify({ action:'toast', message:`${targetUser} исключён из клана` }));
         }
 
-        // ФИКС: Синхронизация имени экшена 'clan_motd'
         else if (action === 'clan_set_motd') {
           if (!ws.isAuthorized || !ws.userData.clan) return;
           const message_of_day = data.motd || data.message_of_day;
@@ -883,7 +875,6 @@ initDatabases().then(() => {
         // ══════════════════════════════════════════════════
         //  SHOP / INVENTORY
         // ══════════════════════════════════════════════════
-        // ФИКС: Изменено название экшена, чтобы совпадало с UI клиентом
         else if (action === 'buy_item') {
           if (!ws.isAuthorized) return;
           const itemId = data.item_id;
@@ -919,19 +910,18 @@ initDatabases().then(() => {
           ws.userData.upgrades  = newUpgrades;
           ws.userData.inventory = newInventory;
 
-          // Собираем плоский массив для клиента
           let clientItems = [...newUpgrades];
           for (let k in newInventory) {
             for (let i = 0; i < newInventory[k]; i++) clientItems.push(k);
           }
 
-          // ФИКС: отправляем 'purchase_update' вместо 'shop_purchase_ok'
           ws.send(JSON.stringify({ action:'purchase_update', purchased_items: clientItems, coins: newCoins, message:`✅ Куплено: ${item.title}` }));
         }
 
+        // Передаём 'data', чтобы получить координаты x/y клика клиента
         else if (action === 'use_item') {
           if (!ws.isAuthorized) return;
-          await useConsumable(ws, data.item_id || data.itemId);
+          await useConsumable(ws, data.item_id || data.itemId, data);
         }
 
         // ══════════════════════════════════════════════════
@@ -1063,11 +1053,9 @@ initDatabases().then(() => {
             await persistCanvas();
 
             if (pixelsToUpdate.length > 0) sendPixelBulk(pixelsToUpdate);
-            // ФИКС: Отправляем событие move_saved клиенту для сброса состояния
             ws.send(JSON.stringify({ action:'move_saved' }));
           }
 
-          // ФИКС: Добавлен радужный шторм
           else if (cmd === 'rainbow_storm') {
              const pixels = [];
              for (let y = 0; y < CANVAS_HEIGHT; y++) {
@@ -1123,7 +1111,6 @@ initDatabases().then(() => {
             ws.send(JSON.stringify({ action:'toast', message:`Кулдаун: ${serverSettings.cooldownMs}мс` }));
           }
 
-          // ФИКС: Обработка глобального трафарета
           else if (cmd === 'set_global_stencil') {
             serverSettings.globalStencil = data.params;
             await saveSettings();
