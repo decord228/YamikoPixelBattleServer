@@ -21,7 +21,9 @@
   "homepage": "https://github.com/decord228/YamikoPixelBattleServer#readme",
   "dependencies": {
     "@upstash/redis": "^1.37.0",
+    "cloudinary": "^2.9.0",
     "express": "^5.2.1",
+    "mongoose": "^9.3.3",
     "ws": "^8.20.0"
   }
 }
