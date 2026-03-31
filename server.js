@@ -41,6 +41,7 @@ if (cloudinary && process.env.CLOUDINARY_CLOUD_NAME) {
     api_key:    process.env.CLOUDINARY_API_KEY,
     api_secret: process.env.CLOUDINARY_API_SECRET,
   });
+  console.log('✅ Cloudinary подключён');
 }
 
 // ── DB TIMEOUT HELPER (Защита от зависаний MongoDB) ──
@@ -55,7 +56,6 @@ const dbTimeout = (promise, ms = 4000) => {
 let AccountModel = null, ClanModel = null, TemplateModel = null, SettingsModel = null;
 
 if (mongoose) {
-  // Отключаем бесконечное ожидание и автоиндексы
   mongoose.set('bufferCommands', false);
   mongoose.set('autoIndex', false);
 
@@ -111,6 +111,7 @@ if (mongoose) {
 let redis = null;
 if (Redis && process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
   redis = new Redis({ url: process.env.UPSTASH_REDIS_REST_URL, token: process.env.UPSTASH_REDIS_REST_TOKEN });
+  console.log('✅ Upstash Redis подключён');
 }
 
 // ── DB HELPERS ──
@@ -744,6 +745,27 @@ initDatabases().then(() => {
                 wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized) c.send(sendBuf); });
             }
             ws.send(JSON.stringify({ action: 'toast', message: `Область успешно перемещена` }));
+          }
+
+          else if (cmd === 'fill_rect') {
+            const { x, y, w, h, colorIdx } = data.params;
+            if (colorIdx >= 0 && colorIdx < 32) {
+              const pixels = [];
+              for (let row = y; row < Math.min(y + h, CANVAS_HEIGHT); row++)
+                for (let col = x; col < Math.min(x + w, CANVAS_WIDTH); col++) {
+                  canvasData[row * CANVAS_WIDTH + col] = colorIdx;
+                  pixels.push({ x: col, y: row, c: colorIdx });
+                }
+              isDirty = true;
+              const sendBuf = new Uint8Array(pixels.length * 5);
+              for (let i = 0; i < pixels.length; i++) {
+                const p = pixels[i];
+                sendBuf[i*5] = (p.x>>8)&0xFF; sendBuf[i*5+1] = p.x&0xFF;
+                sendBuf[i*5+2] = (p.y>>8)&0xFF; sendBuf[i*5+3] = p.y&0xFF; sendBuf[i*5+4] = p.c;
+              }
+              wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized) c.send(sendBuf); });
+              ws.send(JSON.stringify({ action: 'toast', message: `Залито ${pixels.length} пикселей` }));
+            }
           }
 
           else if (cmd === 'draw_shape') {
