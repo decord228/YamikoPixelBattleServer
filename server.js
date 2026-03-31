@@ -47,6 +47,9 @@ if (cloudinary && process.env.CLOUDINARY_CLOUD_NAME) {
 let AccountModel = null, ClanModel = null, TemplateModel = null, SettingsModel = null;
 
 if (mongoose) {
+  // Отключаем бесконечное ожидание запросов глобально
+  mongoose.set('bufferCommands', false);
+
   const AccountSchema = new mongoose.Schema({
     username:       { type: String, unique: true, index: true },
     password:       String,
@@ -105,9 +108,9 @@ if (Redis && process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_RES
 async function dbGetAccount(username) {
   if (AccountModel) {
     try {
-      const doc = await AccountModel.findOne({ username }).lean();
+      const doc = await AccountModel.findOne({ username }).maxTimeMS(5000).lean();
       if (doc) accounts[username] = { ...accounts[username], ...doc };
-    } catch(e) { console.error('❌ Ошибка БД (dbGetAccount):', e.message); }
+    } catch(e) { console.error(`❌ Ошибка БД (dbGetAccount, юзер: ${username}):`, e.message); }
   }
   return accounts[username] || null;
 }
@@ -116,8 +119,8 @@ async function dbSaveAccount(username, data) {
   accounts[username] = { ...accounts[username], ...data };
   if (AccountModel) {
     try {
-      await AccountModel.findOneAndUpdate({ username }, data, { upsert: true, new: true });
-    } catch(e) { console.error('❌ Ошибка БД (dbSaveAccount):', e.message); }
+      await AccountModel.findOneAndUpdate({ username }, data, { upsert: true, new: true, maxTimeMS: 5000 });
+    } catch(e) { console.error(`❌ Ошибка БД (dbSaveAccount, юзер: ${username}):`, e.message); }
   } else {
     saveLocalAccounts();
   }
@@ -126,8 +129,12 @@ async function dbSaveAccount(username, data) {
 async function dbGetAllAccounts() {
   if (AccountModel) {
     try {
-      return await AccountModel.find({}).lean();
-    } catch(e) { console.error('❌ Ошибка БД (dbGetAllAccounts):', e.message); return []; }
+      // maxTimeMS отменит запрос через 5 секунд, если БД висит
+      return await AccountModel.find({}).maxTimeMS(5000).lean();
+    } catch(e) { 
+      console.error('❌ Ошибка БД (dbGetAllAccounts):', e.message); 
+      return []; 
+    }
   }
   return Object.entries(accounts).map(([username, v]) => ({ username, ...v }));
 }
@@ -135,9 +142,9 @@ async function dbGetAllAccounts() {
 async function dbGetClan(name) {
   if (ClanModel) {
     try {
-      const doc = await ClanModel.findOne({ name }).lean();
+      const doc = await ClanModel.findOne({ name }).maxTimeMS(5000).lean();
       if (doc) clans[name] = { ...clans[name], ...doc };
-    } catch(e) { console.error('❌ Ошибка БД (dbGetClan):', e.message); }
+    } catch(e) { console.error(`❌ Ошибка БД (dbGetClan, клан: ${name}):`, e.message); }
   }
   return clans[name] || null;
 }
@@ -146,30 +153,33 @@ async function dbSaveClan(name, data) {
   clans[name] = { ...clans[name], ...data };
   if (ClanModel) {
     try {
-      await ClanModel.findOneAndUpdate({ name }, data, { upsert: true, new: true });
-    } catch(e) { console.error('❌ Ошибка БД (dbSaveClan):', e.message); }
+      await ClanModel.findOneAndUpdate({ name }, data, { upsert: true, new: true, maxTimeMS: 5000 });
+    } catch(e) { console.error(`❌ Ошибка БД (dbSaveClan, клан: ${name}):`, e.message); }
   }
 }
 
 async function dbGetAllClans() {
   if (ClanModel) {
     try {
-      return await ClanModel.find({}).lean();
-    } catch(e) { console.error('❌ Ошибка БД (dbGetAllClans):', e.message); return []; }
+      return await ClanModel.find({}).maxTimeMS(5000).lean();
+    } catch(e) { 
+      console.error('❌ Ошибка БД (dbGetAllClans):', e.message); 
+      return []; 
+    }
   }
   return Object.values(clans);
 }
 
 async function dbDeleteClan(name) {
   if (ClanModel) {
-    try { await ClanModel.deleteOne({ name }); } catch(e) { console.error('❌ Ошибка БД (dbDeleteClan):', e.message); }
+    try { await ClanModel.deleteOne({ name }).maxTimeMS(5000); } catch(e) { console.error(`❌ Ошибка БД (dbDeleteClan, клан: ${name}):`, e.message); }
   }
   delete clans[name];
 }
 
 async function dbGetTemplates() {
   if (TemplateModel) {
-    try { return await TemplateModel.find({}).lean(); } catch(e) { return []; }
+    try { return await TemplateModel.find({}).maxTimeMS(5000).lean(); } catch(e) { return []; }
   }
   return templates;
 }
@@ -184,7 +194,7 @@ async function dbSaveTemplate(data) {
 async function dbGetSettings() {
   if (SettingsModel) {
     try {
-      const doc = await SettingsModel.findOne({ key: 'server_settings' }).lean();
+      const doc = await SettingsModel.findOne({ key: 'server_settings' }).maxTimeMS(5000).lean();
       return doc ? doc.value : null;
     } catch(e) { return null; }
   }
@@ -193,7 +203,7 @@ async function dbGetSettings() {
 
 async function dbSaveSettings(settings) {
   if (SettingsModel) {
-    try { await SettingsModel.findOneAndUpdate({ key: 'server_settings' }, { value: settings }, { upsert: true }); } catch(e) {}
+    try { await SettingsModel.findOneAndUpdate({ key: 'server_settings' }, { value: settings }, { upsert: true, maxTimeMS: 5000 }); } catch(e) {}
   }
 }
 
@@ -205,11 +215,15 @@ function saveLocalAccounts() {
 async function initDatabases() {
   if (mongoose && process.env.MONGODB_URI) {
     try {
-      await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 5000, socketTimeoutMS: 30000 });
+      await mongoose.connect(process.env.MONGODB_URI, { 
+        serverSelectionTimeoutMS: 5000, 
+        socketTimeoutMS: 30000,
+        bufferCommands: false // Строго отключаем зависание Mongoose!
+      });
       console.log('✅ MongoDB Atlas подключён');
     } catch(e) {
-      console.error('❌ MongoDB ошибка (Возможно нет доступа по IP):', e.message);
-      mongoose = null; AccountModel = null; ClanModel = null; TemplateModel = null;
+      console.error('❌ MongoDB ошибка подключения:', e.message);
+      mongoose = null; AccountModel = null; ClanModel = null; TemplateModel = null; SettingsModel = null;
     }
   }
 
