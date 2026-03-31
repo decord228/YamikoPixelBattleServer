@@ -26,9 +26,9 @@ let isDirty       = false;
 let serverSettings = { cursorTrackingEnabled: false, cooldownMs: 3000 };
 
 // ── IN-MEMORY STORES (fallback if no DB) ──
-let accounts  = {};  // username -> accountDoc
-let clans     = {};  // clanName -> clanDoc
-let templates = [];  // array of template meta
+let accounts  = {};  
+let clans     = {};  
+let templates = [];  
 
 // ── BATCHING FOR DB ──
 const dirtyAccounts = new Set();
@@ -43,7 +43,7 @@ if (cloudinary && process.env.CLOUDINARY_CLOUD_NAME) {
   });
 }
 
-// ── DB TIMEOUT HELPER ──
+// ── DB TIMEOUT HELPER (Защита от зависаний MongoDB) ──
 const dbTimeout = (promise, ms = 4000) => {
   return Promise.race([
     promise,
@@ -55,8 +55,9 @@ const dbTimeout = (promise, ms = 4000) => {
 let AccountModel = null, ClanModel = null, TemplateModel = null, SettingsModel = null;
 
 if (mongoose) {
-  mongoose.set('autoIndex', false);
+  // Отключаем бесконечное ожидание и автоиндексы
   mongoose.set('bufferCommands', false);
+  mongoose.set('autoIndex', false);
 
   const AccountSchema = new mongoose.Schema({
     username:       { type: String, unique: true, index: true },
@@ -745,27 +746,6 @@ initDatabases().then(() => {
             ws.send(JSON.stringify({ action: 'toast', message: `Область успешно перемещена` }));
           }
 
-          else if (cmd === 'fill_rect') {
-            const { x, y, w, h, colorIdx } = data.params;
-            if (colorIdx >= 0 && colorIdx < 32) {
-              const pixels = [];
-              for (let row = y; row < Math.min(y + h, CANVAS_HEIGHT); row++)
-                for (let col = x; col < Math.min(x + w, CANVAS_WIDTH); col++) {
-                  canvasData[row * CANVAS_WIDTH + col] = colorIdx;
-                  pixels.push({ x: col, y: row, c: colorIdx });
-                }
-              isDirty = true;
-              const sendBuf = new Uint8Array(pixels.length * 5);
-              for (let i = 0; i < pixels.length; i++) {
-                const p = pixels[i];
-                sendBuf[i*5] = (p.x>>8)&0xFF; sendBuf[i*5+1] = p.x&0xFF;
-                sendBuf[i*5+2] = (p.y>>8)&0xFF; sendBuf[i*5+3] = p.y&0xFF; sendBuf[i*5+4] = p.c;
-              }
-              wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized) c.send(sendBuf); });
-              ws.send(JSON.stringify({ action: 'toast', message: `Залито ${pixels.length} пикселей` }));
-            }
-          }
-
           else if (cmd === 'draw_shape') {
             const { type, params, colorIdx } = data;
             if (colorIdx < 0 || colorIdx >= 32) return;
@@ -805,17 +785,6 @@ initDatabases().then(() => {
                 const e2 = 2*err;
                 if (e2>-dy){err-=dy;x0+=sx;}
                 if (e2<dx){err+=dx;y0+=sy;}
-              }
-            } else if (type === 'ellipse') {
-              const { cx, cy, rx, ry } = params;
-              const filled = params.filled !== false;
-              for (let py = cy-ry; py <= cy+ry; py++) for (let px = cx-rx; px <= cx+rx; px++) {
-                const dx = px-cx, dy = py-cy;
-                const v = (dx*dx)/(rx*rx) + (dy*dy)/(ry*ry);
-                const onEdge = v <= 1.05 && v >= 0.85;
-                if (filled ? v<=1 : onEdge) {
-                  if (px>=0&&px<CANVAS_WIDTH&&py>=0&&py<CANVAS_HEIGHT) pixels.push({x:px,y:py,c:colorIdx});
-                }
               }
             }
             if (pixels.length > 0) {
