@@ -117,7 +117,8 @@ if (mongoose) {
     clan:              { type: String, default: '' },
     inventory:         { type: Object, default: {} },
     upgrades:          { type: [String], default: [] },
-    active_stencil:    { type: Object, default: null }, // Сохраненный трафарет
+    active_stencil:    { type: Object, default: null }, // Текущий трафарет
+    saved_stencils:    { type: Array, default: [] },    // Сохраненные пресеты трафаретов
   }, { timestamps: true, autoIndex: false });
 
   const ClanSchema = new mongoose.Schema({
@@ -129,8 +130,16 @@ if (mongoose) {
     members:        [String],
     join_requests:  { type: [String], default: [] },
     pixels:         { type: Number, default: 0 },
-    share_cursor:   { type: Boolean, default: false },
     active_stencil: { type: Object, default: null },
+    
+    // Новые настройки клана
+    icon:           { type: String, default: '🏴' },
+    tag_color:      { type: String, default: '#818cf8' },
+    join_type:      { type: String, default: 'open' }, // 'open', 'request', 'closed'
+    min_pixels:     { type: Number, default: 0 },
+    is_public:      { type: Boolean, default: true },
+    share_cursor:   { type: Boolean, default: false },
+    social_link:    { type: String, default: '' }
   }, { timestamps: true, autoIndex: false });
 
   const TemplateSchema = new mongoose.Schema({
@@ -504,26 +513,8 @@ initDatabases().then(() => {
           pixels.push({x:nx, y:ny, c:reqColor});
         }
       }
-    } else if (itemId === 'rainbow_5x5') {
-      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
-        const nx = px+dx, ny = py+dy;
-        if (nx>=0&&nx<CANVAS_WIDTH&&ny>=0&&ny<CANVAS_HEIGHT) {
-          const rc = Math.floor(Math.random()*32); // Случайный цвет палитры
-          canvasData[ny*CANVAS_WIDTH+nx] = rc;
-          pixels.push({x:nx, y:ny, c:rc});
-        }
-      }
-    } else if (itemId === 'eraser_10x10') {
-      for (let dy = -4; dy <= 5; dy++) for (let dx = -4; dx <= 5; dx++) {
-        const nx = px+dx, ny = py+dy;
-        if (nx>=0&&nx<CANVAS_WIDTH&&ny>=0&&ny<CANVAS_HEIGHT) {
-          canvasData[ny*CANVAS_WIDTH+nx] = 0; // Белый
-          pixels.push({x:nx, y:ny, c:0});
-        }
-      }
     } else if (itemId === 'mirror_stamp') {
       const temp = [];
-      // Копируем квадрат 5x5
       for (let dy = -2; dy <= 2; dy++) {
         for (let dx = -2; dx <= 2; dx++) {
           const nx = px+dx, ny = py+dy;
@@ -532,9 +523,8 @@ initDatabases().then(() => {
           }
         }
       }
-      // Отражаем по горизонтали и применяем
       for (const p of temp) {
-         const mx = px - p.dx; // Миррор по X
+         const mx = px - p.dx; 
          const my = py + p.dy;
          if (mx>=0&&mx<CANVAS_WIDTH&&my>=0&&my<CANVAS_HEIGHT) {
             canvasData[my*CANVAS_WIDTH+mx] = p.c;
@@ -543,7 +533,6 @@ initDatabases().then(() => {
       }
     }
 
-    // Списываем предмет из инвентаря
     inv[itemId]--;
     if (inv[itemId] <= 0) delete inv[itemId];
     acc.inventory = inv;
@@ -555,7 +544,6 @@ initDatabases().then(() => {
       sendPixelBulk(pixels);
     }
     
-    // Обновляем клиент
     let clientItems = [...acc.upgrades];
     for (let k in inv) {
       for (let i = 0; i < inv[k]; i++) clientItems.push(k);
@@ -641,7 +629,7 @@ initDatabases().then(() => {
             if (existing) { ws.send(JSON.stringify({ action:'toast', message:'Ник уже занят!' })); return; }
             let role = 'user';
             if ((username === 'd3cord' && email === 'otarasik10@gmail.com') || username === ADMIN_USERNAME) role = 'admin';
-            const newUser = { username, password, email, role, pixels: 0, rank: 'Новичок', emoji: '👾', banned: false, timeout_until: 0, coins: 0, clan: '', inventory: {}, upgrades: [], active_stencil: null };
+            const newUser = { username, password, email, role, pixels: 0, rank: 'Новичок', emoji: '👾', banned: false, timeout_until: 0, coins: 0, clan: '', inventory: {}, upgrades: [], active_stencil: null, saved_stencils: [] };
             await dbSaveAccount(username, newUser);
             ws.userData = { ...newUser };
           } else {
@@ -657,6 +645,7 @@ initDatabases().then(() => {
           ws.isAuthorized = true;
           ws.userData.inventory = ws.userData.inventory || {};
           ws.userData.upgrades  = ws.userData.upgrades  || [];
+          ws.userData.saved_stencils = ws.userData.saved_stencils || [];
 
           let clientItems = [...ws.userData.upgrades];
           for (let k in ws.userData.inventory) {
@@ -676,7 +665,8 @@ initDatabases().then(() => {
             canvas_w:  CANVAS_WIDTH,
             canvas_h:  CANVAS_HEIGHT,
             settings:  serverSettings,
-            stencil:   ws.userData.active_stencil
+            stencil:   ws.userData.active_stencil,
+            saved_stencils: ws.userData.saved_stencils
           }));
           broadcastOnlineCount();
           ws.send(canvasData);
@@ -688,6 +678,26 @@ initDatabases().then(() => {
           ws.userData.active_stencil = data.stencil;
         }
 
+        else if (action === 'save_stencil_preset') {
+          if (!ws.isAuthorized || !data.stencil) return;
+          const acc = await dbGetAccount(ws.userData.username);
+          const stencils = acc.saved_stencils || [];
+          stencils.push({ name: data.name || 'Без имени', stencil: data.stencil });
+          await dbSaveAccount(ws.userData.username, { saved_stencils: stencils });
+          ws.userData.saved_stencils = stencils;
+          ws.send(JSON.stringify({ action: 'stencil_presets_update', stencils, message: 'Шаблон сохранен!' }));
+        }
+
+        else if (action === 'delete_stencil_preset') {
+          if (!ws.isAuthorized || data.index === undefined) return;
+          const acc = await dbGetAccount(ws.userData.username);
+          let stencils = acc.saved_stencils || [];
+          stencils.splice(data.index, 1);
+          await dbSaveAccount(ws.userData.username, { saved_stencils: stencils });
+          ws.userData.saved_stencils = stencils;
+          ws.send(JSON.stringify({ action: 'stencil_presets_update', stencils }));
+        }
+
         else if (action === 'get_leaderboard') {
           const allAccs  = await dbGetAllAccounts();
           const players  = allAccs
@@ -695,7 +705,8 @@ initDatabases().then(() => {
             .sort((a, b) => b.pixels - a.pixels).slice(0, 30);
           const allClans = await dbGetAllClans();
           const clanTop  = allClans
-            .map(c => ({ name: c.name, tag: c.tag||'', pixels: c.pixels||0, members: (c.members||[]).length }))
+            .filter(c => c.is_public !== false)
+            .map(c => ({ name: c.name, tag: c.tag||'', tag_color: c.tag_color||'#818cf8', pixels: c.pixels||0, members: (c.members||[]).length }))
             .sort((a, b) => b.pixels - a.pixels).slice(0, 20);
           ws.send(JSON.stringify({ action: 'leaderboard_data', players, clans: clanTop }));
         }
@@ -746,7 +757,12 @@ initDatabases().then(() => {
           const newCoins = (acc.coins - 50);
           await dbSaveAccount(ws.userData.username, { coins: newCoins, clan: name });
           ws.userData.coins = newCoins; ws.userData.clan = name;
-          await dbSaveClan(name, { name, tag: tag||name.slice(0,4).toUpperCase(), description: description||'', message_of_day:'', leader: ws.userData.username, members:[ws.userData.username], join_requests:[], pixels:0, share_cursor:false, active_stencil:null });
+          await dbSaveClan(name, { 
+             name, tag: tag||name.slice(0,4).toUpperCase(), description: description||'', 
+             message_of_day:'', leader: ws.userData.username, members:[ws.userData.username], 
+             join_requests:[], pixels:0, share_cursor:false, active_stencil:null,
+             icon: '🏴', tag_color: '#818cf8', join_type: 'open', min_pixels: 0, is_public: true, social_link: ''
+          });
           ws.send(JSON.stringify({ action:'clan_update', clan: await dbGetClan(name), coins: ws.userData.coins, message:`Клан "${name}" создан!` }));
         }
 
@@ -757,6 +773,19 @@ initDatabases().then(() => {
           if (!clan) { ws.send(JSON.stringify({ action:'toast', message:'Клан не найден' })); return; }
           const acc = await dbGetAccount(ws.userData.username);
           if (acc.clan) { ws.send(JSON.stringify({ action:'toast', message:'Сначала покиньте текущий клан' })); return; }
+          
+          if (clan.join_type === 'closed') { ws.send(JSON.stringify({ action:'toast', message:'Вступление в клан закрыто' })); return; }
+          if ((acc.pixels || 0) < (clan.min_pixels || 0)) { ws.send(JSON.stringify({ action:'toast', message:`Нужно минимум ${clan.min_pixels} пикселей` })); return; }
+          
+          if (clan.join_type === 'request') {
+             if ((clan.join_requests||[]).includes(ws.userData.username)) { ws.send(JSON.stringify({ action:'toast', message:'Заявка уже отправлена' })); return; }
+             const reqs = [...(clan.join_requests||[]), ws.userData.username];
+             await dbSaveClan(name, { join_requests: reqs });
+             broadcastToClan(name, JSON.stringify({ action:'clan_join_request_in', username:ws.userData.username, clanName:name }), null);
+             ws.send(JSON.stringify({ action:'toast', message:`Заявка на вступление отправлена` }));
+             return;
+          }
+
           const newMembers = [...(clan.members||[]), ws.userData.username];
           await dbSaveClan(name, { members: newMembers });
           await dbSaveAccount(ws.userData.username, { clan: name });
@@ -765,16 +794,28 @@ initDatabases().then(() => {
           broadcastToClan(name, JSON.stringify({ action:'clan_member_joined', username:ws.userData.username }), ws);
         }
 
-        else if (action === 'clan_join_request') {
-          if (!ws.isAuthorized) return;
-          const { name } = data;
-          const clan = await dbGetClan(name);
-          if (!clan) return;
-          if ((clan.join_requests||[]).includes(ws.userData.username)) return;
-          const requests = [...(clan.join_requests||[]), ws.userData.username];
-          await dbSaveClan(name, { join_requests: requests });
-          broadcastToClan(name, JSON.stringify({ action:'clan_join_request_in', username:ws.userData.username, clanName:name }), null);
-          ws.send(JSON.stringify({ action:'toast', message:`Заявка в "${name}" отправлена` }));
+        else if (action === 'clan_update_settings') {
+          if (!ws.isAuthorized || !ws.userData.clan) return;
+          const clan = await dbGetClan(ws.userData.clan);
+          if (!clan || clan.leader !== ws.userData.username) { ws.send(JSON.stringify({ action:'toast', message:'Нет прав' })); return; }
+          
+          const settings = data.settings || {};
+          const update = {
+             icon: settings.icon || '🏴',
+             tag_color: settings.tag_color || '#818cf8',
+             join_type: settings.join_type || 'open',
+             min_pixels: parseInt(settings.min_pixels) || 0,
+             is_public: !!settings.is_public,
+             share_cursor: !!settings.share_cursor,
+             social_link: settings.social_link || '',
+             message_of_day: (settings.message_of_day || '').slice(0, 200)
+          };
+          
+          await dbSaveClan(ws.userData.clan, update);
+          const newClanData = await dbGetClan(ws.userData.clan);
+          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_data', clan: newClanData }), null);
+          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_settings_update', share_cursor: update.share_cursor }), null);
+          ws.send(JSON.stringify({ action:'toast', message:'Настройки клана сохранены', type:'success' }));
         }
 
         else if (action === 'clan_get_requests') {
@@ -833,16 +874,6 @@ initDatabases().then(() => {
           ws.send(JSON.stringify({ action:'toast', message:`${targetUser} исключён из клана` }));
         }
 
-        else if (action === 'clan_set_motd') {
-          if (!ws.isAuthorized || !ws.userData.clan) return;
-          const message_of_day = data.motd || data.message_of_day;
-          const clan = await dbGetClan(ws.userData.clan);
-          if (!clan || clan.leader !== ws.userData.username) return;
-          await dbSaveClan(ws.userData.clan, { message_of_day: (message_of_day||'').slice(0,200) });
-          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_motd', motd: message_of_day }), null);
-          ws.send(JSON.stringify({ action:'toast', message:'Сообщение дня обновлено' }));
-        }
-
         else if (action === 'clan_leave') {
           if (!ws.isAuthorized || !ws.userData.clan) return;
           const clanName = ws.userData.clan;
@@ -858,16 +889,6 @@ initDatabases().then(() => {
           await dbSaveAccount(ws.userData.username, { clan: '' });
           ws.userData.clan = '';
           ws.send(JSON.stringify({ action:'clan_update', clan:null, message:'Вы покинули клан' }));
-        }
-
-        else if (action === 'clan_toggle_cursor') {
-          if (!ws.isAuthorized || !ws.userData.clan) return;
-          const clan = await dbGetClan(ws.userData.clan);
-          if (!clan || clan.leader !== ws.userData.username) { ws.send(JSON.stringify({ action:'toast', message:'Только лидер может управлять настройками' })); return; }
-          const newVal = !clan.share_cursor;
-          await dbSaveClan(ws.userData.clan, { share_cursor: newVal });
-          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_settings_update', share_cursor: newVal }), null);
-          ws.send(JSON.stringify({ action:'toast', message:`Общий курсор: ${newVal?'вкл':'выкл'}` }));
         }
 
         else if (action === 'clan_share_stencil') {
@@ -887,8 +908,8 @@ initDatabases().then(() => {
 
         else if (action === 'clan_list') {
           const allClans = await dbGetAllClans();
-          ws.send(JSON.stringify({ action:'clan_list_data', clans: allClans.map(c => ({
-            name: c.name, tag: c.tag, members: (c.members||[]).length, pixels: c.pixels||0, description: c.description||''
+          ws.send(JSON.stringify({ action:'clan_list_data', clans: allClans.filter(c => c.is_public !== false).map(c => ({
+            name: c.name, tag: c.tag, tag_color: c.tag_color, icon: c.icon, join_type: c.join_type, members: (c.members||[]).length, pixels: c.pixels||0, description: c.description||''
           })) }));
         }
 
