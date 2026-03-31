@@ -709,33 +709,24 @@ initDatabases().then(() => {
             ws.send(JSON.stringify({ action: 'toast', message: 'Холст очищен!' }));
           }
 
-          else if (cmd === 'fill_rect') {
-            const { x, y, w, h, colorIdx } = data.params;
-            if (colorIdx >= 0 && colorIdx < 32) {
-              const pixels = [];
-              for (let row = y; row < Math.min(y + h, CANVAS_HEIGHT); row++)
-                for (let col = x; col < Math.min(x + w, CANVAS_WIDTH); col++) {
-                  canvasData[row * CANVAS_WIDTH + col] = colorIdx;
-                  pixels.push({ x: col, y: row, c: colorIdx });
-                }
-              isDirty = true;
-              const sendBuf = new Uint8Array(pixels.length * 5);
-              for (let i = 0; i < pixels.length; i++) {
-                const p = pixels[i];
-                sendBuf[i*5] = (p.x>>8)&0xFF; sendBuf[i*5+1] = p.x&0xFF;
-                sendBuf[i*5+2] = (p.y>>8)&0xFF; sendBuf[i*5+3] = p.y&0xFF; sendBuf[i*5+4] = p.c;
-              }
-              wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized) c.send(sendBuf); });
-              ws.send(JSON.stringify({ action: 'toast', message: `Залито ${pixels.length} пикселей` }));
-            }
-          }
-
           else if (cmd === 'draw_shape') {
-            // Generic shape: {type:'circle'|'line'|'ellipse', params, colorIdx}
+            // Generic shape: {type:'circle'|'line'|'ellipse'|'rect', params, colorIdx}
             const { type, params, colorIdx } = data;
             if (colorIdx < 0 || colorIdx >= 32) return;
             const pixels = [];
-            if (type === 'circle') {
+            
+            if (type === 'rect') {
+              const { x, y, w, h } = params;
+              const filled = params.filled !== false;
+              for (let py = y; py < y + h; py++) {
+                for (let px = x; px < x + w; px++) {
+                  const onEdge = px === x || px === x + w - 1 || py === y || py === y + h - 1;
+                  if (filled ? true : onEdge) {
+                    if (px >= 0 && px < CANVAS_WIDTH && py >= 0 && py < CANVAS_HEIGHT) pixels.push({ x: px, y: py, c: colorIdx });
+                  }
+                }
+              }
+            } else if (type === 'circle') {
               const { cx, cy, r } = params;
               const filled = params.filled !== false;
               for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
@@ -779,6 +770,45 @@ initDatabases().then(() => {
               wss.clients.forEach(c => { if (c.readyState===1&&c.isAuthorized) c.send(sendBuf); });
               ws.send(JSON.stringify({ action: 'toast', message: `Фигура нарисована (${pixels.length} пикселей)` }));
             }
+          }
+
+          else if (cmd === 'move_area') {
+            const { sx, sy, w, h, dx, dy } = data.params;
+            const temp = [];
+            const pixelsToUpdate = [];
+
+            // Read source and clear it
+            for (let py = 0; py < h; py++) {
+                for (let px = 0; px < w; px++) {
+                    const cx = sx + px, cy = sy + py;
+                    if (cx >= 0 && cx < CANVAS_WIDTH && cy >= 0 && cy < CANVAS_HEIGHT) {
+                        temp.push({ x: px, y: py, c: canvasData[cy * CANVAS_WIDTH + cx] });
+                        canvasData[cy * CANVAS_WIDTH + cx] = 0;
+                        pixelsToUpdate.push({ x: cx, y: cy, c: 0 });
+                    }
+                }
+            }
+
+            // Write to destination
+            for (const p of temp) {
+                const nx = dx + p.x, ny = dy + p.y;
+                if (nx >= 0 && nx < CANVAS_WIDTH && ny >= 0 && ny < CANVAS_HEIGHT) {
+                    canvasData[ny * CANVAS_WIDTH + nx] = p.c;
+                    pixelsToUpdate.push({ x: nx, y: ny, c: p.c });
+                }
+            }
+
+            isDirty = true;
+            if (pixelsToUpdate.length > 0) {
+                const sendBuf = new Uint8Array(pixelsToUpdate.length * 5);
+                for (let i = 0; i < pixelsToUpdate.length; i++) {
+                    const p = pixelsToUpdate[i];
+                    sendBuf[i*5] = (p.x>>8)&0xFF; sendBuf[i*5+1] = p.x&0xFF;
+                    sendBuf[i*5+2] = (p.y>>8)&0xFF; sendBuf[i*5+3] = p.y&0xFF; sendBuf[i*5+4] = p.c;
+                }
+                wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized) c.send(sendBuf); });
+            }
+            ws.send(JSON.stringify({ action: 'toast', message: `Область перемещена` }));
           }
 
           else if (cmd === 'place_image') {
