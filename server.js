@@ -1,9 +1,8 @@
 'use strict';
 
 // ════════════════════════════════════════════════════════════
-//  PIXEL BATTLE — SERVER v2.0
-//  Рефакторинг + новые фичи: VIP-роль, магазин, кулдаун-слайдер,
-//  сохранение move_area, превью изображений, глобальный чат
+//  PIXEL BATTLE — SERVER v2.0 (FIXED)
+//  Исправлена экономика, магазин и синхронизация пакетов
 // ════════════════════════════════════════════════════════════
 
 const express    = require('express');
@@ -34,6 +33,7 @@ let isDirty       = false;
 let serverSettings = {
   cursorTrackingEnabled: false,
   cooldownMs: 3000,
+  globalStencil: null
 };
 
 // ── IN-MEMORY STORES ───────────────────────────────────────
@@ -76,9 +76,6 @@ function getRank(pixels) {
 }
 
 // ── SHOP CATALOGUE ─────────────────────────────────────────
-// Структура: { id, title, desc, cost, role, type }
-// role: 'user' | 'vip' | 'admin'
-// type: 'upgrade' | 'consumable'
 const SHOP_ITEMS = [
   // USER
   { id: 'stencil_auto_color', title:'Авто-цвет трафарета',   desc:'При наведении на трафарет авто-выбирает ближайший цвет из палитры.',         cost:100,  role:'user',  type:'upgrade' },
@@ -111,7 +108,7 @@ if (mongoose) {
     username:          { type: String, unique: true, index: true },
     password:          String,
     email:             String,
-    role:              { type: String, default: 'user' },     // 'user' | 'vip' | 'admin'
+    role:              { type: String, default: 'user' }, 
     pixels:            { type: Number, default: 0 },
     rank:              { type: String, default: 'Новичок' },
     emoji:             { type: String, default: '👾' },
@@ -119,9 +116,7 @@ if (mongoose) {
     timeout_until:     { type: Number, default: 0 },
     coins:             { type: Number, default: 0 },
     clan:              { type: String, default: '' },
-    // Инвентарь: { itemId: количество }
     inventory:         { type: Object, default: {} },
-    // Апгрейды (куплены навсегда)
     upgrades:          { type: [String], default: [] },
   }, { timestamps: true, autoIndex: false });
 
@@ -514,7 +509,6 @@ initDatabases().then(() => {
         pixels.push({x:nx, y:py, c:cc});
       }
     } else if (itemId === 'cooldown_skip') {
-      // Клиент обрабатывает сам, просто уведомляем
       ws.send(JSON.stringify({ action:'cooldown_reset' }));
     } else if (itemId === 'godmode_paint') {
       for (let i = 0; i < 100; i++) {
@@ -534,7 +528,6 @@ initDatabases().then(() => {
       }
     }
 
-    // Уменьшаем количество предмета в инвентаре
     inv[itemId]--;
     if (inv[itemId] <= 0) delete inv[itemId];
     acc.inventory = inv;
@@ -545,8 +538,13 @@ initDatabases().then(() => {
       isDirty = true;
       sendPixelBulk(pixels);
     }
+    
+    let clientItems = [...acc.upgrades];
+    for (let k in inv) {
+      for (let i = 0; i < inv[k]; i++) clientItems.push(k);
+    }
     ws.send(JSON.stringify({ action:'toast', message:`✅ Использован: ${itemId}`, type:'success' }));
-    ws.send(JSON.stringify({ action:'inventory_update', inventory: inv }));
+    ws.send(JSON.stringify({ action:'purchase_update', purchased_items: clientItems }));
   }
 
   // ══════════════════════════════════════════════════════════
@@ -556,10 +554,8 @@ initDatabases().then(() => {
     ws.isAuthorized = false;
     ws.userData     = null;
 
-    // Сразу отдаём холст и настройки
     ws.send(canvasData);
     ws.send(JSON.stringify({ action: 'server_settings', settings: serverSettings }));
-    // Отдаём историю чата
     if (globalChatHistory.length > 0) {
       ws.send(JSON.stringify({ action: 'chat_history', messages: globalChatHistory }));
     }
@@ -589,8 +585,10 @@ initDatabases().then(() => {
 
           const prevCoins = acc.coins || 0;
           acc.pixels = (acc.pixels || 0) + 1;
-          acc.coins  = Math.floor(acc.pixels * COINS_PER_PIXEL);
-          acc.rank   = getRank(acc.pixels).name;
+          
+          // ФИКС ВАЛЮТЫ: Инкрементируем баланс вместо жесткого пересчета
+          acc.coins = (acc.coins || 0) + COINS_PER_PIXEL;
+          acc.rank  = getRank(acc.pixels).name;
 
           accounts[acc.username] = { ...accounts[acc.username], pixels: acc.pixels, coins: acc.coins, rank: acc.rank };
           dirtyAccounts.add(acc.username);
@@ -639,13 +637,18 @@ initDatabases().then(() => {
             ws.userData = { ...acc, username };
           }
 
-          // Хардкод-роль d3cord
           if (username === 'd3cord' && ws.userData.email === 'otarasik10@gmail.com') ws.userData.role = 'admin';
           if (ws.userData.banned) { ws.send(JSON.stringify({ action:'toast', message:'Ваш аккаунт заблокирован!' })); return; }
 
           ws.isAuthorized = true;
           ws.userData.inventory = ws.userData.inventory || {};
           ws.userData.upgrades  = ws.userData.upgrades  || [];
+
+          // Собираем плоский массив предметов для клиента
+          let clientItems = [...ws.userData.upgrades];
+          for (let k in ws.userData.inventory) {
+            for (let i = 0; i < ws.userData.inventory[k]; i++) clientItems.push(k);
+          }
 
           ws.send(JSON.stringify({
             action:    'auth_success',
@@ -656,8 +659,7 @@ initDatabases().then(() => {
             emoji:     ws.userData.emoji     || '👾',
             coins:     ws.userData.coins     || 0,
             clan:      ws.userData.clan      || '',
-            inventory: ws.userData.inventory || {},
-            upgrades:  ws.userData.upgrades  || [],
+            purchased_items: clientItems,
             canvas_w:  CANVAS_WIDTH,
             canvas_h:  CANVAS_HEIGHT,
             settings:  serverSettings,
@@ -666,7 +668,6 @@ initDatabases().then(() => {
           ws.send(canvasData);
         }
 
-        // ── LEADERBOARD ─────────────────────────────────────
         else if (action === 'get_leaderboard') {
           const allAccs  = await dbGetAllAccounts();
           const players  = allAccs
@@ -679,7 +680,6 @@ initDatabases().then(() => {
           ws.send(JSON.stringify({ action: 'leaderboard_data', players, clans: clanTop }));
         }
 
-        // ── CURSOR ──────────────────────────────────────────
         else if (action === 'cursor') {
           if (!ws.isAuthorized) return;
           if (!serverSettings.cursorTrackingEnabled && !(ws.userData.clan && data.clan_only)) return;
@@ -688,7 +688,6 @@ initDatabases().then(() => {
           else wss.clients.forEach(c => { if (c !== ws && c.readyState === 1 && c.isAuthorized) c.send(msg); });
         }
 
-        // ── SAVE EMOJI ──────────────────────────────────────
         else if (action === 'save_emoji') {
           if (!ws.isAuthorized) return;
           ws.userData.emoji = data.emoji || '👾';
@@ -696,24 +695,16 @@ initDatabases().then(() => {
           ws.send(JSON.stringify({ action:'toast', message:'Аватар сохранён!' }));
         }
 
-        // ── GLOBAL CHAT ─────────────────────────────────────
         else if (action === 'chat_send') {
           if (!ws.isAuthorized) return;
           const text = (data.text || '').trim().slice(0, 200);
           if (!text) return;
-          const msg = {
-            username: ws.userData.username,
-            role:     ws.userData.role || 'user',
-            emoji:    ws.userData.emoji || '👾',
-            text,
-            ts: Date.now(),
-          };
+          const msg = { username: ws.userData.username, role: ws.userData.role || 'user', emoji: ws.userData.emoji || '👾', text, ts: Date.now() };
           globalChatHistory.push(msg);
           if (globalChatHistory.length > CHAT_HISTORY_LIMIT) globalChatHistory.shift();
           broadcastAll(JSON.stringify({ action: 'chat_message', msg }));
         }
 
-        // ── CLAN CHAT ────────────────────────────────────────
         else if (action === 'clan_chat_send') {
           if (!ws.isAuthorized || !ws.userData.clan) return;
           const text = (data.text || '').trim().slice(0, 200);
@@ -728,9 +719,7 @@ initDatabases().then(() => {
         else if (action === 'clan_create') {
           if (!ws.isAuthorized) return;
           const { name, tag, description } = data;
-          if (!name || name.length < 2 || name.length > 24) {
-            ws.send(JSON.stringify({ action:'toast', message:'Название клана: 2–24 символа' })); return;
-          }
+          if (!name || name.length < 2 || name.length > 24) { ws.send(JSON.stringify({ action:'toast', message:'Название клана: 2–24 символа' })); return; }
           const existing = await dbGetClan(name);
           if (existing) { ws.send(JSON.stringify({ action:'toast', message:'Клан с таким именем уже есть!' })); return; }
           const acc = await dbGetAccount(ws.userData.username);
@@ -771,16 +760,26 @@ initDatabases().then(() => {
           ws.send(JSON.stringify({ action:'toast', message:`Заявка в "${name}" отправлена` }));
         }
 
+        // ФИКС: Обработка получения заявок в клан
+        else if (action === 'clan_get_requests') {
+          if (!ws.isAuthorized || !ws.userData.clan) return;
+          const clan = await dbGetClan(ws.userData.clan);
+          if (clan && clan.leader === ws.userData.username) {
+            ws.send(JSON.stringify({ action: 'clan_requests', requests: clan.join_requests || [] }));
+          }
+        }
+
+        // ФИКС: Ожидаем username, а не target
         else if (action === 'clan_accept_request') {
           if (!ws.isAuthorized || !ws.userData.clan) return;
-          const { target } = data;
+          const target = data.username;
           const clan = await dbGetClan(ws.userData.clan);
           if (!clan || clan.leader !== ws.userData.username) return;
           const requests = (clan.join_requests||[]).filter(r => r !== target);
           const newMembers = [...(clan.members||[]), target];
           await dbSaveClan(ws.userData.clan, { members: newMembers, join_requests: requests });
           await dbSaveAccount(target, { clan: ws.userData.clan });
-          // Обновляем ws цели, если онлайн
+          
           wss.clients.forEach(c => {
             if (c.isAuthorized && c.userData?.username === target) {
               c.userData.clan = ws.userData.clan;
@@ -788,32 +787,47 @@ initDatabases().then(() => {
             }
           });
           ws.send(JSON.stringify({ action:'toast', message:`${target} принят в клан` }));
+          ws.send(JSON.stringify({ action:'clan_requests', requests }));
+        }
+
+        // ФИКС: Добавлен обработчик отказа заявки
+        else if (action === 'clan_deny_request') {
+          if (!ws.isAuthorized || !ws.userData.clan) return;
+          const target = data.username;
+          const clan = await dbGetClan(ws.userData.clan);
+          if (!clan || clan.leader !== ws.userData.username) return;
+          const requests = (clan.join_requests||[]).filter(r => r !== target);
+          await dbSaveClan(ws.userData.clan, { join_requests: requests });
+          ws.send(JSON.stringify({ action:'toast', message:`Заявка от ${target} отклонена` }));
+          ws.send(JSON.stringify({ action:'clan_requests', requests }));
         }
 
         else if (action === 'clan_kick') {
           if (!ws.isAuthorized || !ws.userData.clan) return;
-          const { target } = data;
+          const { target } = data; // ui.js sends username: target - wait, ui.js sends `username`!
+          const targetUser = data.username || data.target;
           const clan = await dbGetClan(ws.userData.clan);
-          if (!clan || clan.leader !== ws.userData.username || target === ws.userData.username) return;
-          const newMembers = (clan.members||[]).filter(m => m !== target);
+          if (!clan || clan.leader !== ws.userData.username || targetUser === ws.userData.username) return;
+          const newMembers = (clan.members||[]).filter(m => m !== targetUser);
           await dbSaveClan(ws.userData.clan, { members: newMembers });
-          await dbSaveAccount(target, { clan: '' });
+          await dbSaveAccount(targetUser, { clan: '' });
           wss.clients.forEach(c => {
-            if (c.isAuthorized && c.userData?.username === target) {
+            if (c.isAuthorized && c.userData?.username === targetUser) {
               c.userData.clan = '';
               c.send(JSON.stringify({ action:'clan_update', clan:null, message:'Вас исключили из клана' }));
             }
           });
-          ws.send(JSON.stringify({ action:'toast', message:`${target} исключён из клана` }));
+          ws.send(JSON.stringify({ action:'toast', message:`${targetUser} исключён из клана` }));
         }
 
+        // ФИКС: Синхронизация имени экшена 'clan_motd'
         else if (action === 'clan_set_motd') {
           if (!ws.isAuthorized || !ws.userData.clan) return;
-          const { message_of_day } = data;
+          const message_of_day = data.motd || data.message_of_day;
           const clan = await dbGetClan(ws.userData.clan);
           if (!clan || clan.leader !== ws.userData.username) return;
           await dbSaveClan(ws.userData.clan, { message_of_day: (message_of_day||'').slice(0,200) });
-          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_motd_update', message_of_day }), null);
+          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_motd', motd: message_of_day }), null);
           ws.send(JSON.stringify({ action:'toast', message:'Сообщение дня обновлено' }));
         }
 
@@ -869,28 +883,25 @@ initDatabases().then(() => {
         // ══════════════════════════════════════════════════
         //  SHOP / INVENTORY
         // ══════════════════════════════════════════════════
-        else if (action === 'shop_buy') {
+        // ФИКС: Изменено название экшена, чтобы совпадало с UI клиентом
+        else if (action === 'buy_item') {
           if (!ws.isAuthorized) return;
-          const { itemId } = data;
+          const itemId = data.item_id;
           const item = SHOP_ITEMS.find(i => i.id === itemId);
           if (!item) { ws.send(JSON.stringify({ action:'toast', message:'Предмет не найден' })); return; }
 
-          // Проверяем доступ по роли
-          if (!hasRole(ws.userData, item.role)) {
-            ws.send(JSON.stringify({ action:'toast', message:`Этот предмет доступен только для: ${item.role}` })); return;
-          }
+          if (!hasRole(ws.userData, item.role)) { ws.send(JSON.stringify({ action:'toast', message:`Этот предмет доступен только для: ${item.role}` })); return; }
 
           const acc = await dbGetAccount(ws.userData.username);
           const upgrades  = acc.upgrades  || [];
           const inventory = acc.inventory || {};
 
-          // Апгрейды покупаются один раз
           if (item.type === 'upgrade') {
             if (upgrades.includes(itemId)) { ws.send(JSON.stringify({ action:'toast', message:'Уже куплено!' })); return; }
           }
 
           if ((acc.coins||0) < item.cost && item.cost > 0) {
-            ws.send(JSON.stringify({ action:'toast', message:`Нужно ${item.cost} монет. У вас ${acc.coins||0}` })); return;
+            ws.send(JSON.stringify({ action:'toast', message:`Нужно ${item.cost} монет. У вас ${Math.floor(acc.coins||0)}` })); return;
           }
 
           const newCoins = (acc.coins||0) - item.cost;
@@ -908,12 +919,19 @@ initDatabases().then(() => {
           ws.userData.upgrades  = newUpgrades;
           ws.userData.inventory = newInventory;
 
-          ws.send(JSON.stringify({ action:'shop_purchase_ok', itemId, coins: newCoins, upgrades: newUpgrades, inventory: newInventory, message:`✅ Куплено: ${item.title}` }));
+          // Собираем плоский массив для клиента
+          let clientItems = [...newUpgrades];
+          for (let k in newInventory) {
+            for (let i = 0; i < newInventory[k]; i++) clientItems.push(k);
+          }
+
+          // ФИКС: отправляем 'purchase_update' вместо 'shop_purchase_ok'
+          ws.send(JSON.stringify({ action:'purchase_update', purchased_items: clientItems, coins: newCoins, message:`✅ Куплено: ${item.title}` }));
         }
 
         else if (action === 'use_item') {
           if (!ws.isAuthorized) return;
-          await useConsumable(ws, data.itemId);
+          await useConsumable(ws, data.item_id || data.itemId);
         }
 
         // ══════════════════════════════════════════════════
@@ -925,7 +943,6 @@ initDatabases().then(() => {
           }
           const cmd = data.cmd;
 
-          // Список пользователей
           if (cmd === 'get_users') {
             const page = data.page || 1, limit = 10;
             const allAccs = await dbGetAllAccounts();
@@ -965,7 +982,6 @@ initDatabases().then(() => {
             }
           }
 
-          // Выдача роли (теперь включает 'vip')
           else if (cmd === 'set_role') {
             const validRoles = ['user','vip','admin'];
             if (!validRoles.includes(data.params)) { ws.send(JSON.stringify({ action:'toast', message:'Неверная роль' })); return; }
@@ -1018,13 +1034,11 @@ initDatabases().then(() => {
             ws.send(JSON.stringify({ action:'toast', message:'Холст очищен!' }));
           }
 
-          // ── MOVE AREA (с сохранением в canvasData и на диск) ──
           else if (cmd === 'move_area') {
             const { sx, sy, w, h, dx, dy } = data.params;
             const temp          = [];
             const pixelsToUpdate = [];
 
-            // 1. Читаем исходную область и очищаем
             for (let py = 0; py < h; py++) {
               for (let px = 0; px < w; px++) {
                 const cx = sx+px, cy = sy+py;
@@ -1036,7 +1050,6 @@ initDatabases().then(() => {
               }
             }
 
-            // 2. Рисуем в новом месте
             for (const p of temp) {
               if (p.c === 0) continue;
               const nx = dx+p.x, ny = dy+p.y;
@@ -1046,76 +1059,35 @@ initDatabases().then(() => {
               }
             }
 
-            // 3. Сохраняем СРАЗУ (не ждём 10 сек)
             isDirty = true;
             await persistCanvas();
 
             if (pixelsToUpdate.length > 0) sendPixelBulk(pixelsToUpdate);
-            ws.send(JSON.stringify({ action:'toast', message:'Область перемещена и сохранена' }));
+            // ФИКС: Отправляем событие move_saved клиенту для сброса состояния
+            ws.send(JSON.stringify({ action:'move_saved' }));
           }
 
-          else if (cmd === 'fill_rect') {
-            const { x, y, w, h, colorIdx } = data.params;
-            if (colorIdx >= 0 && colorIdx < 32) {
-              const pixels = [];
-              for (let row = y; row < Math.min(y+h, CANVAS_HEIGHT); row++)
-                for (let col = x; col < Math.min(x+w, CANVAS_WIDTH); col++) {
-                  canvasData[row*CANVAS_WIDTH+col] = colorIdx;
-                  pixels.push({ x:col, y:row, c:colorIdx });
-                }
-              isDirty = true;
-              sendPixelBulk(pixels);
-              ws.send(JSON.stringify({ action:'toast', message:`Залито ${pixels.length} пикселей` }));
-            }
+          // ФИКС: Добавлен радужный шторм
+          else if (cmd === 'rainbow_storm') {
+             const pixels = [];
+             for (let y = 0; y < CANVAS_HEIGHT; y++) {
+               const cc = y % 32;
+               for (let x = 0; x < CANVAS_WIDTH; x++) {
+                 canvasData[y*CANVAS_WIDTH+x] = cc;
+                 pixels.push({x, y, c:cc});
+               }
+             }
+             isDirty = true;
+             sendPixelBulk(pixels);
+             ws.send(JSON.stringify({ action:'toast', message:'Радужный шторм запущен!' }));
           }
 
-          else if (cmd === 'draw_shape') {
-            const { type, params, colorIdx } = data;
-            if (colorIdx < 0 || colorIdx >= 32) return;
-            const pixels = [];
-            if (type === 'rect') {
-              const { x, y, w, h, filled } = params;
-              for (let py = y; py < y+h; py++) for (let px = x; px < x+w; px++) {
-                const onEdge = px===x||px===x+w-1||py===y||py===y+h-1;
-                if (filled !== false ? true : onEdge)
-                  if (px>=0&&px<CANVAS_WIDTH&&py>=0&&py<CANVAS_HEIGHT) pixels.push({x:px,y:py,c:colorIdx});
-              }
-            } else if (type === 'circle') {
-              const { cx, cy, r, filled } = params;
-              for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
-                const dist2 = dx*dx+dy*dy, inside = dist2<=r*r, onEdge = dist2>=(r-1)*(r-1);
-                if (filled !== false ? inside : onEdge) {
-                  const px = cx+dx, py = cy+dy;
-                  if (px>=0&&px<CANVAS_WIDTH&&py>=0&&py<CANVAS_HEIGHT) pixels.push({x:px,y:py,c:colorIdx});
-                }
-              }
-            } else if (type === 'line') {
-              let { x0, y0, x1, y1 } = params;
-              const dx=Math.abs(x1-x0), dy=Math.abs(y1-y0), sx=x0<x1?1:-1, sy=y0<y1?1:-1;
-              let err=dx-dy;
-              while (true) {
-                if (x0>=0&&x0<CANVAS_WIDTH&&y0>=0&&y0<CANVAS_HEIGHT) pixels.push({x:x0,y:y0,c:colorIdx});
-                if (x0===x1&&y0===y1) break;
-                const e2=2*err;
-                if (e2>-dy){err-=dy;x0+=sx;} if (e2<dx){err+=dx;y0+=sy;}
-              }
-            }
-            if (pixels.length) {
-              pixels.forEach(p => { canvasData[p.y*CANVAS_WIDTH+p.x] = p.c; });
-              isDirty = true;
-              sendPixelBulk(pixels);
-              ws.send(JSON.stringify({ action:'toast', message:`Фигура нарисована (${pixels.length} px)` }));
-            }
-          }
-
-          // ── PLACE_IMAGE: финальное применение превью ────────
           else if (cmd === 'place_image') {
             const { pixels } = data.params;
             if (Array.isArray(pixels) && pixels.length > 0) {
               const valid = pixels.filter(p => p.x>=0&&p.x<CANVAS_WIDTH&&p.y>=0&&p.y<CANVAS_HEIGHT&&p.c>=0&&p.c<32);
               valid.forEach(p => { canvasData[p.y*CANVAS_WIDTH+p.x] = p.c; });
               isDirty = true;
-              // Сохраняем сразу
               await persistCanvas();
               sendPixelBulk(valid);
               ws.send(JSON.stringify({ action:'toast', message:`Изображение применено (${valid.length} px)` }));
@@ -1149,6 +1121,19 @@ initDatabases().then(() => {
             await saveSettings();
             broadcastAll(JSON.stringify({ action:'server_settings', settings:serverSettings }));
             ws.send(JSON.stringify({ action:'toast', message:`Кулдаун: ${serverSettings.cooldownMs}мс` }));
+          }
+
+          // ФИКС: Обработка глобального трафарета
+          else if (cmd === 'set_global_stencil') {
+            serverSettings.globalStencil = data.params;
+            await saveSettings();
+            broadcastAll(JSON.stringify({ action:'server_settings', settings:serverSettings }));
+          }
+
+          else if (cmd === 'clear_global_stencil') {
+            serverSettings.globalStencil = null;
+            await saveSettings();
+            broadcastAll(JSON.stringify({ action:'server_settings', settings:serverSettings }));
           }
 
           else if (cmd === 'admin_stats') {
