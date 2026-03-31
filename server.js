@@ -104,8 +104,10 @@ if (Redis && process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_RES
 // ── DB HELPERS ──
 async function dbGetAccount(username) {
   if (AccountModel) {
-    const doc = await AccountModel.findOne({ username }).lean();
-    if (doc) accounts[username] = { ...accounts[username], ...doc };
+    try {
+      const doc = await AccountModel.findOne({ username }).lean();
+      if (doc) accounts[username] = { ...accounts[username], ...doc };
+    } catch(e) { console.error('❌ Ошибка БД (dbGetAccount):', e.message); }
   }
   return accounts[username] || null;
 }
@@ -113,21 +115,29 @@ async function dbGetAccount(username) {
 async function dbSaveAccount(username, data) {
   accounts[username] = { ...accounts[username], ...data };
   if (AccountModel) {
-    await AccountModel.findOneAndUpdate({ username }, data, { upsert: true, new: true });
+    try {
+      await AccountModel.findOneAndUpdate({ username }, data, { upsert: true, new: true });
+    } catch(e) { console.error('❌ Ошибка БД (dbSaveAccount):', e.message); }
   } else {
     saveLocalAccounts();
   }
 }
 
 async function dbGetAllAccounts() {
-  if (AccountModel) return await AccountModel.find({}).lean();
+  if (AccountModel) {
+    try {
+      return await AccountModel.find({}).lean();
+    } catch(e) { console.error('❌ Ошибка БД (dbGetAllAccounts):', e.message); return []; }
+  }
   return Object.entries(accounts).map(([username, v]) => ({ username, ...v }));
 }
 
 async function dbGetClan(name) {
   if (ClanModel) {
-    const doc = await ClanModel.findOne({ name }).lean();
-    if (doc) clans[name] = { ...clans[name], ...doc };
+    try {
+      const doc = await ClanModel.findOne({ name }).lean();
+      if (doc) clans[name] = { ...clans[name], ...doc };
+    } catch(e) { console.error('❌ Ошибка БД (dbGetClan):', e.message); }
   }
   return clans[name] || null;
 }
@@ -135,41 +145,55 @@ async function dbGetClan(name) {
 async function dbSaveClan(name, data) {
   clans[name] = { ...clans[name], ...data };
   if (ClanModel) {
-    await ClanModel.findOneAndUpdate({ name }, data, { upsert: true, new: true });
+    try {
+      await ClanModel.findOneAndUpdate({ name }, data, { upsert: true, new: true });
+    } catch(e) { console.error('❌ Ошибка БД (dbSaveClan):', e.message); }
   }
 }
 
 async function dbGetAllClans() {
-  if (ClanModel) return await ClanModel.find({}).lean();
+  if (ClanModel) {
+    try {
+      return await ClanModel.find({}).lean();
+    } catch(e) { console.error('❌ Ошибка БД (dbGetAllClans):', e.message); return []; }
+  }
   return Object.values(clans);
 }
 
 async function dbDeleteClan(name) {
-  if (ClanModel) await ClanModel.deleteOne({ name });
+  if (ClanModel) {
+    try { await ClanModel.deleteOne({ name }); } catch(e) { console.error('❌ Ошибка БД (dbDeleteClan):', e.message); }
+  }
   delete clans[name];
 }
 
 async function dbGetTemplates() {
-  if (TemplateModel) return await TemplateModel.find({}).lean();
+  if (TemplateModel) {
+    try { return await TemplateModel.find({}).lean(); } catch(e) { return []; }
+  }
   return templates;
 }
 
 async function dbSaveTemplate(data) {
-  if (TemplateModel) return await new TemplateModel(data).save();
+  if (TemplateModel) {
+    try { return await new TemplateModel(data).save(); } catch(e) {}
+  }
   templates.push(data);
 }
 
 async function dbGetSettings() {
   if (SettingsModel) {
-    const doc = await SettingsModel.findOne({ key: 'server_settings' }).lean();
-    return doc ? doc.value : null;
+    try {
+      const doc = await SettingsModel.findOne({ key: 'server_settings' }).lean();
+      return doc ? doc.value : null;
+    } catch(e) { return null; }
   }
   return null;
 }
 
 async function dbSaveSettings(settings) {
   if (SettingsModel) {
-    await SettingsModel.findOneAndUpdate({ key: 'server_settings' }, { value: settings }, { upsert: true });
+    try { await SettingsModel.findOneAndUpdate({ key: 'server_settings' }, { value: settings }, { upsert: true }); } catch(e) {}
   }
 }
 
@@ -181,10 +205,10 @@ function saveLocalAccounts() {
 async function initDatabases() {
   if (mongoose && process.env.MONGODB_URI) {
     try {
-      await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 8000, socketTimeoutMS: 30000 });
+      await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 5000, socketTimeoutMS: 30000 });
       console.log('✅ MongoDB Atlas подключён');
     } catch(e) {
-      console.error('❌ MongoDB ошибка:', e.message);
+      console.error('❌ MongoDB ошибка (Возможно нет доступа по IP):', e.message);
       mongoose = null; AccountModel = null; ClanModel = null; TemplateModel = null;
     }
   }
@@ -447,7 +471,7 @@ initDatabases().then(() => {
           ws.send(JSON.stringify({
             action:         'auth_success',
             username:       ws.userData.username,
-            role:           ws.userData.role,
+            role:           ws.userData.role || 'user',
             pixels:         ws.userData.pixels || 0,
             rank:           ws.userData.rank   || 'Новичок',
             emoji:          ws.userData.emoji  || '👾',
@@ -465,9 +489,9 @@ initDatabases().then(() => {
 
         else if (action === 'get_leaderboard') {
           const allAccs  = await dbGetAllAccounts();
-          const players  = allAccs.map(a => ({ username: a.username, pixels: a.pixels || 0, emoji: a.emoji || '👾', rank: a.rank || 'Новичок' })).sort((a, b) => b.pixels - a.pixels).slice(0, 30);
+          const players  = allAccs.map(a => ({ username: a.username, pixels: a.pixels || 0, emoji: a.emoji || '👾', rank: a.rank || 'Новичок' })).sort((a, b) => (b.pixels||0) - (a.pixels||0)).slice(0, 30);
           const allClans = await dbGetAllClans();
-          const clanTop  = allClans.map(c => ({ name: c.name, tag: c.tag || '', pixels: c.pixels || 0, members: (c.members || []).length })).sort((a, b) => b.pixels - a.pixels).slice(0, 20);
+          const clanTop  = allClans.map(c => ({ name: c.name, tag: c.tag || '', pixels: c.pixels || 0, members: (c.members || []).length })).sort((a, b) => (b.pixels||0) - (a.pixels||0)).slice(0, 20);
           ws.send(JSON.stringify({ action: 'leaderboard_data', players, clans: clanTop }));
         }
 
@@ -591,7 +615,7 @@ initDatabases().then(() => {
           if (cmd === 'get_users') {
             const page  = data.page || 1, limit = 10;
             const allAccs = await dbGetAllAccounts();
-            const allUsers = allAccs.map(a => ({ username: a.username, role: a.role, banned: a.banned || false, timeout_until: a.timeout_until || 0, pixels: a.pixels || 0, coins: a.coins || 0, clan: a.clan || '' }));
+            const allUsers = allAccs.map(a => ({ username: a.username, role: a.role || 'user', banned: a.banned || false, timeout_until: a.timeout_until || 0, pixels: a.pixels || 0, coins: a.coins || 0, clan: a.clan || '' }));
             const totalPages = Math.ceil(allUsers.length / limit) || 1;
             const startIndex = (page - 1) * limit;
             ws.send(JSON.stringify({ action: 'admin_users_list', page, total_pages: totalPages, users: allUsers.slice(startIndex, startIndex + limit), total: allUsers.length }));
@@ -680,7 +704,7 @@ initDatabases().then(() => {
             }
 
             for (const p of temp) {
-                if (p.c === 0) continue; // Optional: Don't overwrite destination with empty source pixels
+                if (p.c === 0) continue; 
                 const nx = dx + p.x, ny = dy + p.y;
                 if (nx >= 0 && nx < CANVAS_WIDTH && ny >= 0 && ny < CANVAS_HEIGHT) {
                     canvasData[ny * CANVAS_WIDTH + nx] = p.c;
@@ -843,13 +867,16 @@ initDatabases().then(() => {
           }
         }
 
-      } catch(e) {}
+      } catch(e) { 
+        console.error('❌ Ошибка при обработке сообщения WebSocket:', e.message); 
+      }
     });
 
     ws.on('close', () => { broadcastOnlineCount(); });
     ws.on('error', () => {});
   });
 
+  // Broadcast pixel batches every 50ms
   setInterval(() => {
     if (pixelBatchBuffer.length === 0) return;
     const batch   = pixelBatchBuffer.splice(0, pixelBatchBuffer.length);
