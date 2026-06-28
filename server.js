@@ -106,6 +106,7 @@ if (mongoose) {
   const AccountSchema = new mongoose.Schema({
     username:          { type: String, unique: true, index: true },
     password:          String,
+    discord_id:        { type: String, default: '', index: true }, // ← Discord Activity
     email:             String,
     role:              { type: String, default: 'user' }, 
     pixels:            { type: Number, default: 0 },
@@ -178,6 +179,21 @@ async function dbGetAccount(username) {
     } catch(e) { console.error(`❌ dbGetAccount(${username}):`, e.message); }
   }
   return accounts[username] || null;
+}
+
+async function dbGetAccountByDiscordId(discordId) {
+  if (!discordId) return null;
+  try {
+    if (AccountModel) {
+      const doc = await dbTimeout(AccountModel.findOne({ discord_id: discordId }).lean().exec());
+      if (doc) { accounts[doc.username] = { ...accounts[doc.username], ...doc }; return accounts[doc.username]; }
+    }
+    // Fallback: in-memory поиск
+    return Object.values(accounts).find(a => a.discord_id === discordId) || null;
+  } catch(e) {
+    console.error('❌ dbGetAccountByDiscordId:', e.message);
+    return null;
+  }
 }
 
 async function dbSaveAccount(username, data) {
@@ -418,6 +434,36 @@ initDatabases().then(() => {
     try { res.json(await dbGetTemplates()); } catch(e) { res.status(500).json({ error: e.message }); }
   });
 
+  // ── DISCORD ACTIVITY: обмен OAuth-кода на токен ──────────
+  app.post('/api/discord-token', async (req, res) => {
+    try {
+      const { code } = req.body;
+      if (!code) return res.status(400).json({ error: 'No code provided' });
+
+      const response = await fetch('https://discord.com/api/oauth2/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id:     process.env.DISCORD_CLIENT_ID,
+          client_secret: process.env.DISCORD_CLIENT_SECRET,
+          grant_type:    'authorization_code',
+          code,
+        }),
+      });
+
+      const data = await response.json();
+      if (!data.access_token) {
+        console.error('Discord token error:', data);
+        return res.status(400).json({ error: 'Failed to get token' });
+      }
+
+      res.json({ access_token: data.access_token });
+    } catch(e) {
+      console.error('/api/discord-token error:', e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // ── WEB SOCKET ─────────────────────────────────────────
   const server = app.listen(PORT, () => {
     console.log(`🚀 Сервер запущен на порту ${PORT} (${CANVAS_WIDTH}×${CANVAS_HEIGHT})`);
@@ -615,6 +661,95 @@ initDatabases().then(() => {
         const action = data.action || data.type;
 
         if (action === 'auth') {
+          // ── Discord Activity авторизация ──────────────────
+          if (data.discord_token) {
+            try {
+              const discordRes = await fetch('https://discord.com/api/users/@me', {
+                headers: { Authorization: `Bearer ${data.discord_token}` }
+              });
+              const discordUser = await discordRes.json();
+
+              if (!discordUser.id) {
+                ws.send(JSON.stringify({ action: 'toast', message: 'Ошибка Discord авторизации' }));
+                return;
+              }
+
+              const username = discordUser.username;
+
+              // Ищем аккаунт по discord_id или по username
+              let acc = await dbGetAccountByDiscordId(discordUser.id);
+              if (!acc) acc = await dbGetAccount(username);
+
+              if (!acc) {
+                // Первый вход — создаём аккаунт автоматически
+                acc = {
+                  username,
+                  discord_id:     discordUser.id,
+                  password:       null,
+                  email:          discordUser.email || '',
+                  role:           'user',
+                  pixels:         0,
+                  rank:           'Новичок',
+                  emoji:          '👾',
+                  banned:         false,
+                  timeout_until:  0,
+                  coins:          0,
+                  clan:           '',
+                  inventory:      {},
+                  upgrades:       [],
+                  active_stencil: null,
+                  saved_stencils: []
+                };
+                await dbSaveAccount(username, acc);
+              } else if (!acc.discord_id) {
+                // Привязываем discord_id к существующему аккаунту
+                acc.discord_id = discordUser.id;
+                await dbSaveAccount(username, { discord_id: discordUser.id });
+              }
+
+              if (acc.banned) {
+                ws.send(JSON.stringify({ action: 'toast', message: 'Ваш аккаунт заблокирован!' }));
+                return;
+              }
+
+              ws.isAuthorized = true;
+              ws.userData = { ...acc, username };
+              ws.userData.inventory      = ws.userData.inventory      || {};
+              ws.userData.upgrades       = ws.userData.upgrades       || [];
+              ws.userData.saved_stencils = ws.userData.saved_stencils || [];
+
+              let clientItems = [...ws.userData.upgrades];
+              for (let k in ws.userData.inventory) {
+                for (let i = 0; i < ws.userData.inventory[k]; i++) clientItems.push(k);
+              }
+
+              ws.send(JSON.stringify({
+                action:          'auth_success',
+                username:        ws.userData.username,
+                role:            ws.userData.role      || 'user',
+                pixels:          ws.userData.pixels    || 0,
+                rank:            ws.userData.rank      || 'Новичок',
+                emoji:           ws.userData.emoji     || '👾',
+                coins:           ws.userData.coins     || 0,
+                clan:            ws.userData.clan      || '',
+                purchased_items: clientItems,
+                canvas_w:        CANVAS_WIDTH,
+                canvas_h:        CANVAS_HEIGHT,
+                settings:        serverSettings,
+                stencil:         ws.userData.active_stencil,
+                saved_stencils:  ws.userData.saved_stencils,
+              }));
+              broadcastOnlineCount();
+              ws.send(canvasData);
+              return;
+
+            } catch(e) {
+              console.error('Discord auth error:', e);
+              ws.send(JSON.stringify({ action: 'toast', message: 'Ошибка сервера при Discord авторизации' }));
+              return;
+            }
+          }
+          // ── Обычная авторизация username+password ─────────
           const username    = (data.username || '').trim();
           const password    = (data.password || '').trim();
           const email       = (data.email    || '').trim();
