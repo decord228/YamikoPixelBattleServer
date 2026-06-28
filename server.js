@@ -891,25 +891,6 @@ initDatabases().then(() => {
           ws.send(JSON.stringify({ action:'clan_update', clan:null, message:'Вы покинули клан' }));
         }
 
-
-        else if (action === 'clan_disband') {
-          if (!ws.isAuthorized || !ws.userData.clan) return;
-          const clanName = ws.userData.clan;
-          const clan = await dbGetClan(clanName);
-          if (!clan || clan.leader !== ws.userData.username) {
-            ws.send(JSON.stringify({ action:'toast', message:'Только лидер может распустить клан' })); return;
-          }
-          const members = clan.members || [];
-          for (const m of members) { await dbSaveAccount(m, { clan: '' }); }
-          await dbDeleteClan(clanName);
-          wss.clients.forEach(c => {
-            if (c.isAuthorized && members.includes(c.userData?.username)) {
-              c.userData.clan = '';
-              c.send(JSON.stringify({ action:'clan_update', clan:null, message:`Клан "${clanName}" был распущен лидером` }));
-            }
-          });
-          ws.userData.clan = '';
-        }
         else if (action === 'clan_share_stencil') {
           if (!ws.isAuthorized || !ws.userData.clan) return;
           await dbSaveClan(ws.userData.clan, { active_stencil: data.stencil });
@@ -1246,6 +1227,88 @@ initDatabases().then(() => {
               canvas_w:     CANVAS_WIDTH,
               canvas_h:     CANVAS_HEIGHT,
               cooldown_ms:  serverSettings.cooldownMs,
+            }));
+          }
+
+          else if (cmd === 'admin_get_clans') {
+            const allClans = await dbGetAllClans();
+            const onlineUsernames = new Set(
+              Array.from(wss.clients).filter(c => c.isAuthorized).map(c => c.userData.username)
+            );
+            ws.send(JSON.stringify({
+              action: 'admin_clans_data',
+              clans: allClans.map(c => ({
+                name:       c.name,
+                tag:        c.tag || '',
+                tag_color:  c.tag_color || '#818cf8',
+                icon:       c.icon || '🏴',
+                leader:     c.leader || '',
+                members:    c.members || [],
+                pixels:     c.pixels || 0,
+                join_type:  c.join_type || 'open',
+                is_public:  c.is_public !== false,
+                description: c.description || '',
+                online_count: (c.members || []).filter(m => onlineUsernames.has(m)).length,
+              }))
+            }));
+          }
+
+          else if (cmd === 'admin_delete_clan') {
+            const clanName = data.target;
+            if (!clanName) return;
+            const clan = await dbGetClan(clanName);
+            if (!clan) { ws.send(JSON.stringify({ action:'toast', message:'Клан не найден' })); return; }
+            const members = clan.members || [];
+            for (const m of members) await dbSaveAccount(m, { clan: '' });
+            await dbDeleteClan(clanName);
+            wss.clients.forEach(c => {
+              if (c.isAuthorized && members.includes(c.userData?.username)) {
+                c.userData.clan = '';
+                c.send(JSON.stringify({ action:'clan_update', clan:null, message:`Клан "${clanName}" был удалён администратором` }));
+              }
+            });
+            ws.send(JSON.stringify({ action:'toast', message:`Клан "${clanName}" удалён` }));
+            // Refresh clan list for admin
+            const allClans = await dbGetAllClans();
+            const onlineUsernames = new Set(Array.from(wss.clients).filter(c => c.isAuthorized).map(c => c.userData.username));
+            ws.send(JSON.stringify({
+              action: 'admin_clans_data',
+              clans: allClans.map(c => ({
+                name: c.name, tag: c.tag||'', tag_color: c.tag_color||'#818cf8', icon: c.icon||'🏴',
+                leader: c.leader||'', members: c.members||[], pixels: c.pixels||0,
+                join_type: c.join_type||'open', is_public: c.is_public!==false, description: c.description||'',
+                online_count: (c.members||[]).filter(m => onlineUsernames.has(m)).length,
+              }))
+            }));
+          }
+
+          else if (cmd === 'admin_kick_from_clan') {
+            const { clanName, username } = data.params || {};
+            if (!clanName || !username) return;
+            const clan = await dbGetClan(clanName);
+            if (!clan) return;
+            if (clan.leader === username) { ws.send(JSON.stringify({ action:'toast', message:'Нельзя кикнуть лидера — сначала удалите клан' })); return; }
+            const newMembers = (clan.members||[]).filter(m => m !== username);
+            await dbSaveClan(clanName, { members: newMembers });
+            await dbSaveAccount(username, { clan: '' });
+            wss.clients.forEach(c => {
+              if (c.isAuthorized && c.userData?.username === username) {
+                c.userData.clan = '';
+                c.send(JSON.stringify({ action:'clan_update', clan:null, message:`Вас исключил администратор из клана "${clanName}"` }));
+              }
+            });
+            ws.send(JSON.stringify({ action:'toast', message:`${username} исключён из клана ${clanName}` }));
+            // Re-send updated clan list
+            const allClans2 = await dbGetAllClans();
+            const onlineSet = new Set(Array.from(wss.clients).filter(c => c.isAuthorized).map(c => c.userData.username));
+            ws.send(JSON.stringify({
+              action: 'admin_clans_data',
+              clans: allClans2.map(c => ({
+                name: c.name, tag: c.tag||'', tag_color: c.tag_color||'#818cf8', icon: c.icon||'🏴',
+                leader: c.leader||'', members: c.members||[], pixels: c.pixels||0,
+                join_type: c.join_type||'open', is_public: c.is_public!==false, description: c.description||'',
+                online_count: (c.members||[]).filter(m => onlineSet.has(m)).length,
+              }))
             }));
           }
         }
