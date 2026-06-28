@@ -1061,8 +1061,25 @@ initDatabases().then(() => {
         }
         else if (action === 'clan_share_stencil') {
           if (!ws.isAuthorized || !ws.userData.clan) return;
-          await dbSaveClan(ws.userData.clan, { active_stencil: data.stencil });
-          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_stencil_update', stencil: data.stencil }), ws);
+          const clan = await dbGetClan(ws.userData.clan);
+          if (!clan) return;
+          // Store per-member shared stencils map
+          const sharedStencils = clan.shared_stencils || {};
+          sharedStencils[ws.userData.username] = { stencil: data.stencil, emoji: ws.userData.emoji || '👾' };
+          await dbSaveClan(ws.userData.clan, { active_stencil: data.stencil, shared_stencils: sharedStencils });
+          // Broadcast the stencil update to all clan members (except sender)
+          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_stencil_update', stencil: data.stencil, from: ws.userData.username }), ws);
+          // Also notify all clan members (including sender) to refresh the stencils list
+          const stencilsList = Object.entries(sharedStencils).map(([u, v]) => ({ username: u, emoji: v.emoji, stencil: v.stencil }));
+          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_stencils_list', stencils: stencilsList }), null);
+        }
+        else if (action === 'clan_get_stencils') {
+          if (!ws.isAuthorized || !ws.userData.clan) return;
+          const clan = await dbGetClan(ws.userData.clan);
+          if (!clan) { ws.send(JSON.stringify({ action:'clan_stencils_list', stencils: [] })); return; }
+          const sharedStencils = clan.shared_stencils || {};
+          const stencilsList = Object.entries(sharedStencils).map(([u, v]) => ({ username: u, emoji: v.emoji, stencil: v.stencil }));
+          ws.send(JSON.stringify({ action:'clan_stencils_list', stencils: stencilsList }));
         }
 
         else if (action === 'clan_get') {
