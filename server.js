@@ -469,7 +469,7 @@ initDatabases().then(() => {
       console.error('/api/discord-token error:', e);
       res.status(500).json({ error: e.message });
     }
-  });
+  }
 
   // ── WEB SOCKET ─────────────────────────────────────────
   const server = app.listen(PORT, () => {
