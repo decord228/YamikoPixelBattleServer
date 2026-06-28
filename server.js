@@ -891,6 +891,25 @@ initDatabases().then(() => {
           ws.send(JSON.stringify({ action:'clan_update', clan:null, message:'Вы покинули клан' }));
         }
 
+
+        else if (action === 'clan_disband') {
+          if (!ws.isAuthorized || !ws.userData.clan) return;
+          const clanName = ws.userData.clan;
+          const clan = await dbGetClan(clanName);
+          if (!clan || clan.leader !== ws.userData.username) {
+            ws.send(JSON.stringify({ action:'toast', message:'Только лидер может распустить клан' })); return;
+          }
+          const members = clan.members || [];
+          for (const m of members) { await dbSaveAccount(m, { clan: '' }); }
+          await dbDeleteClan(clanName);
+          wss.clients.forEach(c => {
+            if (c.isAuthorized && members.includes(c.userData?.username)) {
+              c.userData.clan = '';
+              c.send(JSON.stringify({ action:'clan_update', clan:null, message:`Клан "${clanName}" был распущен лидером` }));
+            }
+          });
+          ws.userData.clan = '';
+        }
         else if (action === 'clan_share_stencil') {
           if (!ws.isAuthorized || !ws.userData.clan) return;
           await dbSaveClan(ws.userData.clan, { active_stencil: data.stencil });
