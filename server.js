@@ -439,21 +439,23 @@ initDatabases().then(() => {
   app.post('/discord-token', async (req, res) => handleDiscordToken(req, res));
   async function handleDiscordToken(req, res) {
     try {
-      const { code, redirect_uri } = req.body;
+      const { code } = req.body;
       if (!code) return res.status(400).json({ error: 'No code provided' });
 
-      // redirect_uri должен совпадать с тем, что передавался в authorize()
-      const resolvedRedirectUri = redirect_uri ||
-        `https://${process.env.DISCORD_CLIENT_ID}.discordsays.com`;
+      // redirect_uri для Discord Activity всегда фиксирован — домен вида <APP_ID>.discordsays.com
+      // Клиент его не передаёт (authorize() не принимает redirect_uri — ошибка 5000),
+      // поэтому берём строго из env-переменной.
+      const discordClientId = process.env.DISCORD_CLIENT_ID;
+      const redirectUri = `https://${discordClientId}.discordsays.com`;
 
       const response = await fetch('https://discord.com/api/oauth2/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
-          client_id:     process.env.DISCORD_CLIENT_ID,
+          client_id:     discordClientId,
           client_secret: process.env.DISCORD_CLIENT_SECRET,
           grant_type:    'authorization_code',
-          redirect_uri:  resolvedRedirectUri,
+          redirect_uri:  redirectUri,
           code,
         }),
       });
