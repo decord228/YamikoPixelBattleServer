@@ -706,7 +706,7 @@ initDatabases().then(() => {
           const allClans = await dbGetAllClans();
           const clanTop  = allClans
             .filter(c => c.is_public !== false)
-            .map(c => ({ name: c.name, tag: c.tag||'', tag_color: c.tag_color||'#818cf8', pixels: c.pixels||0, members: (c.members||[]).length }))
+            .map(c => ({ name: c.name, tag: c.tag||'', icon: c.icon||'', tag_color: c.tag_color||'#818cf8', pixels: c.pixels||0, members: (c.members||[]).length }))
             .sort((a, b) => b.pixels - a.pixels).slice(0, 20);
           ws.send(JSON.stringify({ action: 'leaderboard_data', players, clans: clanTop }));
         }
