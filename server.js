@@ -437,8 +437,12 @@ initDatabases().then(() => {
   // ── DISCORD ACTIVITY: обмен OAuth-кода на токен ──────────
   app.post('/api/discord-token', async (req, res) => {
     try {
-      const { code } = req.body;
+      const { code, redirect_uri } = req.body;
       if (!code) return res.status(400).json({ error: 'No code provided' });
+
+      // redirect_uri должен совпадать с тем, что передавался в authorize()
+      const resolvedRedirectUri = redirect_uri ||
+        `https://${process.env.DISCORD_CLIENT_ID}.discordsays.com`;
 
       const response = await fetch('https://discord.com/api/oauth2/token', {
         method: 'POST',
@@ -447,6 +451,7 @@ initDatabases().then(() => {
           client_id:     process.env.DISCORD_CLIENT_ID,
           client_secret: process.env.DISCORD_CLIENT_SECRET,
           grant_type:    'authorization_code',
+          redirect_uri:  resolvedRedirectUri,
           code,
         }),
       });
