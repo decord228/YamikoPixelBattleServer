@@ -435,7 +435,9 @@ initDatabases().then(() => {
   });
 
   // ── DISCORD ACTIVITY: обмен OAuth-кода на токен ──────────
-  app.post('/api/discord-token', async (req, res) => {
+  app.post('/api/discord-token', async (req, res) => handleDiscordToken(req, res));
+  app.post('/discord-token', async (req, res) => handleDiscordToken(req, res));
+  async function handleDiscordToken(req, res) {
     try {
       const { code, redirect_uri } = req.body;
       if (!code) return res.status(400).json({ error: 'No code provided' });
