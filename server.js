@@ -413,7 +413,8 @@ initDatabases().then(() => {
   });
 
   // Загрузка шаблонов в Cloudinary
-  app.post('/api/upload-template', async (req, res) => {
+  // Обработчик загрузки шаблонов (два маршрута: с /api/ и без — Discord срезает префикс при проксировании)
+  async function handleUploadTemplate(req, res) {
     try {
       const { imageBase64, name, username } = req.body;
       if (!imageBase64 || !name) return res.status(400).json({ error: 'Missing data' });
@@ -428,11 +429,15 @@ initDatabases().then(() => {
       await dbSaveTemplate({ name, cloudinary_url: cloudUrl, cloudinary_id: cloudId, uploader: username || 'anon' });
       res.json({ success: true, url: cloudUrl, name });
     } catch(e) { res.status(500).json({ error: e.message }); }
-  });
+  }
+  app.post('/api/upload-template', handleUploadTemplate);
+  app.post('/upload-template', handleUploadTemplate); // Discord срезает /api при проксировании
 
-  app.get('/api/templates', async (req, res) => {
+  async function handleGetTemplates(req, res) {
     try { res.json(await dbGetTemplates()); } catch(e) { res.status(500).json({ error: e.message }); }
-  });
+  }
+  app.get('/api/templates', handleGetTemplates);
+  app.get('/templates', handleGetTemplates); // Discord срезает /api при проксировании
 
   // ── DISCORD ACTIVITY: обмен OAuth-кода на токен ──────────
   app.post('/api/discord-token', async (req, res) => handleDiscordToken(req, res));
