@@ -182,12 +182,12 @@ async function getEvents(sessionId) {
 
   if (totalChunks === 0) return Buffer.alloc(0);
 
-  // Загружаем все чанки последовательно (минимум запросов)
-  const parts = [];
-  for (let i = 0; i < totalChunks; i++) {
-    const key = `timelapse/${sessionId}/chunk_${String(i).padStart(4, '0')}.bin`;
-    parts.push(await r2GetBytes(key));
-  }
+  // Загружаем все чанки параллельно — критично для больших сессий,
+  // где последовательные запросы к R2 могут превысить таймаут сервера.
+  const keys = Array.from({ length: totalChunks }, (_, i) =>
+    `timelapse/${sessionId}/chunk_${String(i).padStart(4, '0')}.bin`
+  );
+  const parts = await Promise.all(keys.map(key => r2GetBytes(key)));
   return Buffer.concat(parts);
 }
 
