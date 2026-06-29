@@ -81,6 +81,10 @@ const FLUSH_EVERY_EVENTS  = 10_000;         // или если буфер наб
 
 let session     = null; // активная сессия
 let flushTimer  = null;
+// Promise-цепочка для сериализации флашей: предотвращает race condition,
+// когда два flush запускаются одновременно и оба читают одинаковый chunkIndex
+// до того как первый успел его инкрементировать (await r2Put).
+let _flushChain = Promise.resolve();
 // session: { id, startedAt, buffer: Buffer[], chunkIndex, totalEvents }
 
 // ── Публичное API ──────────────────────────────────────────
@@ -236,11 +240,19 @@ async function getEvents(sessionId) {
 
   if (!totalChunks) return Buffer.alloc(0);
 
-  // Загружаем все чанки параллельно
-  const keys = Array.from({ length: totalChunks }, (_, i) =>
-    `timelapse/${sessionId}/chunk_${String(i).padStart(4, '0')}.bin`
-  );
-  const parts = await Promise.all(keys.map(k => r2GetBytes(k)));
+  // Загружаем чанки последовательно.
+  // Если хотя бы один чанк отсутствует (index устарел) — останавливаемся на том что есть.
+  const parts = [];
+  for (let i = 0; i < totalChunks; i++) {
+    const key = `timelapse/${sessionId}/chunk_${String(i).padStart(4, '0')}.bin`;
+    try {
+      parts.push(await r2GetBytes(key));
+    } catch (e) {
+      console.warn(`[Timelapse] getEvents: чанк ${i} не найден (${e.message}), отдаём ${i} из ${totalChunks}`);
+      break;
+    }
+  }
+  if (!parts.length) return Buffer.alloc(0);
   return Buffer.concat(parts);
 }
 
@@ -261,10 +273,22 @@ function isRecording() { return !!session; }
 
 // ── Приватные хелперы ──────────────────────────────────────
 
-async function _flushBuffer() {
+// _flushBuffer ставит задачу в конец promise-цепочки (_flushChain),
+// гарантируя строгую последовательность: следующий flush не начнётся,
+// пока не завершился r2Put предыдущего. Без этого два параллельных flush
+// читали одинаковый chunkIndex → писали в один файл →
+// chunkIndex инкрементировался дважды → в R2 образовывались «дыры».
+function _flushBuffer() {
+  _flushChain = _flushChain.then(_doFlush).catch(e => {
+    console.error('[Timelapse] flush chain error:', e.message);
+  });
+  return _flushChain;
+}
+
+async function _doFlush() {
   if (!session || session.buffer.length === 0) return;
 
-  const events = session.buffer.splice(0); // дренируем буфер
+  const events = session.buffer.splice(0); // дренируем буфер атомарно (sync)
   const key = `timelapse/${session.id}/chunk_${String(session.chunkIndex).padStart(4, '0')}.bin`;
 
   try {
