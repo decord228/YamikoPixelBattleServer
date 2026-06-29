@@ -219,18 +219,20 @@ async function getEvents(sessionId) {
       } catch (_) {}
     }
 
-    // Последний шанс: сканируем чанки напрямую
+    // Последний шанс: сканируем чанки напрямую, кэшируем байты чтобы не качать дважды
     if (typeof totalChunks === 'undefined') {
       console.warn(`[Timelapse] getEvents: index не найден для ${sessionId}, сканируем чанки...`);
-      totalChunks = 0;
+      const scannedParts = [];
       while (true) {
-        const key = `timelapse/${sessionId}/chunk_${String(totalChunks).padStart(4, '0')}.bin`;
-        try { await r2GetBytes(key); totalChunks++; }
+        const key = `timelapse/${sessionId}/chunk_${String(scannedParts.length).padStart(4, '0')}.bin`;
+        try { scannedParts.push(await r2GetBytes(key)); }
         catch (_) { break; }
       }
-      console.log(`[Timelapse] getEvents: найдено сканированием: ${totalChunks} чанков`);
+      console.log(`[Timelapse] getEvents: найдено сканированием: ${scannedParts.length} чанков`);
+      if (!scannedParts.length) return Buffer.alloc(0);
+      return Buffer.concat(scannedParts); // возвращаем сразу — уже всё скачано
     }
-  }
+  } // конец else (не активная сессия)
 
   if (!totalChunks) return Buffer.alloc(0);
 
@@ -267,12 +269,15 @@ async function _flushBuffer() {
 
   try {
     await r2Put(key, Buffer.concat(events));
+    if (!session) return; // stopRecording() вызвали пока мы ждали r2Put
     const savedIdx = session.chunkIndex;
     session.chunkIndex++;
     console.log(`[Timelapse] ↑ chunk_${savedIdx} → ${events.length} событий (${(events.length * 9 / 1024).toFixed(1)} КБ)`);
   } catch (e) {
     // Не потеряем данные — вернём в начало буфера
-    session.buffer.unshift(...events);
+    // ВАЖНО: нельзя делать unshift(...events) при 10k элементах — RangeError: call stack
+    if (!session) return; // сессия закрыта, данные уже не нужны
+    session.buffer = events.concat(session.buffer);
     console.error('[Timelapse] ❌ Ошибка загрузки чанка:', e.message);
   }
 }
