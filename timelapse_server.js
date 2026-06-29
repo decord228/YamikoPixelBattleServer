@@ -123,6 +123,23 @@ function recordPixel(x, y, c) {
 }
 
 /**
+ * Записать несколько пикселей с одним общим timestamp.
+ * Используется для admin-инструментов (прямоугольник, круг, заливка и т.д.)
+ * чтобы весь батч появился в тайм-лапсе мгновенно, а не по одному пикселю.
+ */
+function recordPixelsBatch(pixels) {
+  if (!session || !pixels || pixels.length === 0) return;
+  const offsetMs = Math.min(Date.now() - session.startedAt, 0xFFFFFFFF);
+  for (const p of pixels) {
+    session.buffer.push(encodeEvent(p.x, p.y, p.c, offsetMs));
+  }
+  session.totalEvents += pixels.length;
+  if (session.buffer.length >= FLUSH_EVERY_EVENTS) {
+    _flushBuffer().catch(e => console.error('[Timelapse] flush error:', e.message));
+  }
+}
+
+/**
  * Остановить запись. Финальный flush + index.json + обновление списка сессий.
  * Итого: +2 Class A ops при остановке.
  */
@@ -172,20 +189,18 @@ async function getSnapshot(sessionId) {
 async function getEvents(sessionId) {
   ensureR2();
 
-  // Определяем количество чанков.
-  // Три источника, в порядке приоритета:
+  // Определяем количество чанков — три уровня fallback:
   //   1. Активная сессия в памяти (запись ещё идёт)
-  //   2. sessions.json — список с метаданными (не всегда есть поле chunks)
-  //   3. index.json сессии (создаётся только при stopRecording)
-  // Если ни один не сработал — перебираем чанки напрямую.
+  //   2. sessions.json — есть поле chunks для завершённых сессий
+  //   3. index.json   — создаётся только при stopRecording
+  //   4. Прямое сканирование чанков в R2 (сессия прервана без stop)
   let totalChunks;
 
   if (session && session.id === sessionId) {
-    // Запись идёт прямо сейчас
     totalChunks = session.chunkIndex;
     console.log(`[Timelapse] getEvents: активная сессия, чанков=${totalChunks}`);
   } else {
-    // Пробуем sessions.json — он содержит поле chunks для завершённых сессий
+    // Пробуем sessions.json
     try {
       const list = JSON.parse(await r2GetText('timelapse/sessions.json'));
       const entry = list.find(s => s.id === sessionId);
@@ -193,32 +208,31 @@ async function getEvents(sessionId) {
         totalChunks = entry.chunks;
         console.log(`[Timelapse] getEvents: из sessions.json, чанков=${totalChunks}`);
       }
-    } catch (_) { /* sessions.json нет или битый — не страшно */ }
+    } catch (_) {}
 
-    // Если в sessions.json не нашли — пробуем index.json
+    // Пробуем index.json
     if (typeof totalChunks === 'undefined') {
       try {
         const idx = JSON.parse(await r2GetText(`timelapse/${sessionId}/index.json`));
         totalChunks = idx.chunks;
         console.log(`[Timelapse] getEvents: из index.json, чанков=${totalChunks}`);
-      } catch (_) { /* index.json тоже нет */ }
+      } catch (_) {}
     }
 
-    // Последний шанс: перебираем чанки напрямую в R2
-    // (нужно если сессия была прервана без stopRecording)
+    // Последний шанс: сканируем чанки напрямую
     if (typeof totalChunks === 'undefined') {
-      console.warn(`[Timelapse] getEvents: index.json не найден для ${sessionId}, сканируем чанки...`);
+      console.warn(`[Timelapse] getEvents: index не найден для ${sessionId}, сканируем чанки...`);
       totalChunks = 0;
       while (true) {
         const key = `timelapse/${sessionId}/chunk_${String(totalChunks).padStart(4, '0')}.bin`;
         try { await r2GetBytes(key); totalChunks++; }
         catch (_) { break; }
       }
-      console.log(`[Timelapse] getEvents: найдено чанков сканированием: ${totalChunks}`);
+      console.log(`[Timelapse] getEvents: найдено сканированием: ${totalChunks} чанков`);
     }
   }
 
-  if (!totalChunks || totalChunks === 0) return Buffer.alloc(0);
+  if (!totalChunks) return Buffer.alloc(0);
 
   // Загружаем все чанки параллельно
   const keys = Array.from({ length: totalChunks }, (_, i) =>
@@ -270,4 +284,4 @@ async function _updateSessionList(newEntry) {
   await r2Put('timelapse/sessions.json', JSON.stringify(list), 'application/json');
 }
 
-module.exports = { startRecording, stopRecording, recordPixel, getSessions, getSnapshot, getEvents, getStatus, isRecording };
+module.exports = { startRecording, stopRecording, recordPixel, recordPixelsBatch, getSessions, getSnapshot, getEvents, getStatus, isRecording };

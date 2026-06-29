@@ -702,9 +702,13 @@ initDatabases().then(() => {
   // автобилдер исчезают из тайм-лапса, хотя реально меняют холст.
   function recordPixelsForTimelapse(pixels) {
     if (!tl || !tl.isRecording() || !pixels || pixels.length === 0) return;
-    for (let i = 0; i < pixels.length; i++) {
-      const p = pixels[i];
-      tl.recordPixel(p.x, p.y, p.c);
+    // Используем батч-метод: все пиксели получают один timestamp,
+    // поэтому admin-инструменты (прямоугольник, круг и т.д.) появляются
+    // в тайм-лапсе мгновенно, а не выстраиваются по одному пикселю.
+    if (tl.recordPixelsBatch) {
+      tl.recordPixelsBatch(pixels);
+    } else {
+      for (const p of pixels) tl.recordPixel(p.x, p.y, p.c);
     }
   }
 
