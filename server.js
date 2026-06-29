@@ -696,6 +696,19 @@ initDatabases().then(() => {
     wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized) c.send(buf); });
   }
 
+  // Записывает пачку изменений холста в активную тайм-лапс сессию.
+  // Используется ВСЕМИ путями изменения canvasData (не только обычной
+  // установкой пикселя игроком) — иначе фигуры/перемещения/VIP-предметы/
+  // автобилдер исчезают из тайм-лапса, хотя реально меняют холст.
+  function recordPixelsForTimelapse(pixels) {
+    if (!tl || !tl.isRecording() || !pixels || pixels.length === 0) return;
+    for (let i = 0; i < pixels.length; i++) {
+      const p = pixels[i];
+      tl.recordPixel(p.x, p.y, p.c);
+    }
+  }
+
+
   function hasRole(userData, role) {
     if (userData.role === 'admin') return true;
     if (role === 'vip' && userData.role === 'vip') return true;
@@ -769,6 +782,7 @@ initDatabases().then(() => {
     if (pixels.length > 0) {
       isDirty = true;
       sendPixelBulk(pixels);
+      recordPixelsForTimelapse(pixels);
     }
     
     let clientItems = [...acc.upgrades];
@@ -1443,6 +1457,24 @@ initDatabases().then(() => {
               CANVAS_WIDTH = newW; CANVAS_HEIGHT = newH; CANVAS_SIZE = newW * newH;
               canvasData = newCanvas; pixelOwners = newOwners;
               isDirty = true; ownersDirty = true;
+
+              // Снапшот активной тайм-лапс сессии зафиксирован со СТАРЫМ размером
+              // холста. Если продолжить писать события в неё дальше, координаты
+              // (x,y), отложенные при воспроизведении на старую ширину снапшота,
+              // разойдутся с реальным холстом — именно так раньше "размазывало"
+              // пиксели по полотну. Поэтому при ресайзе аккуратно закрываем старую
+              // сессию (она останется корректно воспроизводимой как есть) и сразу
+              // открываем новую — уже с новым размером и актуальным содержимым.
+              if (tl && tl.isRecording()) {
+                try {
+                  await tl.stopRecording();
+                  await tl.startRecording(canvasData, CANVAS_WIDTH, CANVAS_HEIGHT);
+                  console.log('[Timelapse] Холст изменён во время записи — сессия перезапущена с новым размером');
+                } catch (e) {
+                  console.error('[Timelapse] Ошибка перезапуска сессии при resize:', e.message);
+                }
+              }
+
               const msg = JSON.stringify({ action:'resize', w:newW, h:newH });
               wss.clients.forEach(c => { if (c.readyState===1&&c.isAuthorized) { c.send(msg); c.send(canvasData); } });
               ws.send(JSON.stringify({ action:'toast', message:`Холст изменён до ${newW}×${newH}` }));
@@ -1450,6 +1482,16 @@ initDatabases().then(() => {
           }
 
           else if (cmd === 'clear_canvas') {
+            // Записываем очистку в тайм-лапс ДО фактической отметки isDirty,
+            // чтобы воспроизведение честно показывало момент, когда холст стал чистым,
+            // а не просто "молчало" и прыгало с одной картинки на другую.
+            if (tl && tl.isRecording()) {
+              for (let y = 0; y < CANVAS_HEIGHT; y++) {
+                for (let x = 0; x < CANVAS_WIDTH; x++) {
+                  if (canvasData[y * CANVAS_WIDTH + x] !== 0) tl.recordPixel(x, y, 0);
+                }
+              }
+            }
             canvasData.fill(0);
             if (pixelOwners) pixelOwners.fill(0);
             isDirty = true; ownersDirty = true;
@@ -1506,6 +1548,7 @@ initDatabases().then(() => {
             if (pixelsToUpdate.length > 0) {
                 isDirty = true;
                 sendPixelBulk(pixelsToUpdate);
+                recordPixelsForTimelapse(pixelsToUpdate);
                 ws.send(JSON.stringify({action: 'toast', message: `Фигура нарисована (${pixelsToUpdate.length} px)`}));
             }
           }
@@ -1538,7 +1581,10 @@ initDatabases().then(() => {
             isDirty = true;
             await persistCanvas();
 
-            if (pixelsToUpdate.length > 0) sendPixelBulk(pixelsToUpdate);
+            if (pixelsToUpdate.length > 0) {
+              sendPixelBulk(pixelsToUpdate);
+              recordPixelsForTimelapse(pixelsToUpdate);
+            }
             ws.send(JSON.stringify({ action:'move_saved' }));
           }
 
@@ -1553,6 +1599,7 @@ initDatabases().then(() => {
              }
              isDirty = true;
              sendPixelBulk(pixels);
+             recordPixelsForTimelapse(pixels);
              ws.send(JSON.stringify({ action:'toast', message:'Радужный шторм запущен!' }));
           }
 
@@ -1564,6 +1611,7 @@ initDatabases().then(() => {
               isDirty = true;
               await persistCanvas();
               sendPixelBulk(valid);
+              recordPixelsForTimelapse(valid);
               ws.send(JSON.stringify({ action:'toast', message:`Изображение применено (${valid.length} px)` }));
             }
           }
