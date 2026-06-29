@@ -20,8 +20,10 @@ try { cloudinary = require('cloudinary').v2; }         catch(e) {}
 // ── CONFIG ─────────────────────────────────────────────────
 const PORT           = process.env.PORT || 3000;
 const ADMIN_USERNAME = 'Yamiko';
-const CANVAS_FILE    = path.join(__dirname, 'canvas.bin');
-const META_FILE      = path.join(__dirname, 'canvas_meta.json');
+const CANVAS_FILE       = path.join(__dirname, 'canvas.bin');
+const META_FILE         = path.join(__dirname, 'canvas_meta.json');
+const PIXEL_OWNERS_FILE = path.join(__dirname, 'pixel_owners.bin');
+const PIXEL_IDS_FILE    = path.join(__dirname, 'pixel_owner_ids.json');
 
 // ── CANVAS STATE ───────────────────────────────────────────
 let CANVAS_WIDTH  = 256;
@@ -29,6 +31,44 @@ let CANVAS_HEIGHT = 256;
 let CANVAS_SIZE   = CANVAS_WIDTH * CANVAS_HEIGHT;
 let canvasData    = null;
 let isDirty       = false;
+
+// ── PIXEL OWNERSHIP ────────────────────────────────────────
+// pixelOwners: Uint16Array[CANVAS_SIZE] — у каждого пикселя ID автора (0 = никто)
+// ownerIdMap:  username → uint16 id
+// ownerDataMap: uint16 id → { username, emoji }
+// Размер для 256×256: 128 КБ — ничтожно мало
+let pixelOwners  = null; // инициализируется после загрузки размеров холста
+const ownerIdMap   = new Map(); // username → id
+const ownerDataMap = new Map(); // id → { username, emoji }
+let nextOwnerId    = 1;
+let ownersDirty    = false;
+
+function getOrCreateOwnerId(username, emoji) {
+  if (ownerIdMap.has(username)) {
+    // Обновим emoji на случай если пользователь его сменил
+    const id = ownerIdMap.get(username);
+    ownerDataMap.set(id, { username, emoji: emoji || '👾' });
+    return id;
+  }
+  const id = nextOwnerId++;
+  ownerIdMap.set(username, id);
+  ownerDataMap.set(id, { username, emoji: emoji || '👾' });
+  return id;
+}
+
+function setPixelOwner(x, y, username, emoji) {
+  if (!pixelOwners || x < 0 || x >= CANVAS_WIDTH || y < 0 || y >= CANVAS_HEIGHT) return;
+  const id = getOrCreateOwnerId(username, emoji);
+  pixelOwners[y * CANVAS_WIDTH + x] = id;
+  ownersDirty = true;
+}
+
+function getPixelOwner(x, y) {
+  if (!pixelOwners || x < 0 || x >= CANVAS_WIDTH || y < 0 || y >= CANVAS_HEIGHT) return null;
+  const id = pixelOwners[y * CANVAS_WIDTH + x];
+  if (!id) return null;
+  return ownerDataMap.get(id) || null;
+}
 
 // ── SERVER SETTINGS ────────────────────────────────────────
 let serverSettings = {
@@ -341,7 +381,8 @@ async function initDatabases() {
 
   // Данные холста
   CANVAS_SIZE = CANVAS_WIDTH * CANVAS_HEIGHT;
-  canvasData  = new Uint8Array(CANVAS_SIZE);
+  canvasData   = new Uint8Array(CANVAS_SIZE);
+  pixelOwners  = new Uint16Array(CANVAS_SIZE);
 
   let canvasLoaded = false;
   if (redis) {
@@ -361,6 +402,34 @@ async function initDatabases() {
     } catch(e) {}
   }
   if (!canvasLoaded) console.log('⚠️ Начат с чистого холста');
+
+  // ── Загрузка авторов пикселей ──────────────────────────
+  try {
+    if (fs.existsSync(PIXEL_IDS_FILE)) {
+      const ids = JSON.parse(fs.readFileSync(PIXEL_IDS_FILE, 'utf8'));
+      let maxId = 0;
+      for (const entry of ids) {
+        ownerIdMap.set(entry.username, entry.id);
+        ownerDataMap.set(entry.id, { username: entry.username, emoji: entry.emoji || '👾' });
+        if (entry.id > maxId) maxId = entry.id;
+      }
+      nextOwnerId = maxId + 1;
+      console.log(`✅ Загружен словарь авторов (${ids.length} записей)`);
+    }
+  } catch(e) { console.error('❌ pixel_owner_ids.json:', e.message); }
+
+  try {
+    if (fs.existsSync(PIXEL_OWNERS_FILE)) {
+      const buf = fs.readFileSync(PIXEL_OWNERS_FILE);
+      // Файл хранит Uint16 little-endian, размер = CANVAS_SIZE * 2
+      if (buf.length === CANVAS_SIZE * 2) {
+        pixelOwners.set(new Uint16Array(buf.buffer, buf.byteOffset, CANVAS_SIZE));
+        console.log('✅ Загружена таблица авторов пикселей');
+      } else {
+        console.log('⚠️ pixel_owners.bin: неверный размер, начинаем заново');
+      }
+    }
+  } catch(e) { console.error('❌ pixel_owners.bin:', e.message); }
 }
 
 // ── PERSIST ────────────────────────────────────────────────
@@ -373,6 +442,24 @@ async function persistCanvas() {
     try { await redis.set('canvas_meta', meta); await redis.set('pixel_canvas', b64); } catch(e) { console.error('❌ Redis save:', e.message); }
   }
   try { fs.writeFileSync(META_FILE, meta); fs.writeFileSync(CANVAS_FILE, canvasData); } catch(e) {}
+
+  // Сохраняем таблицу авторов пикселей (только при изменениях)
+  if (ownersDirty) {
+    ownersDirty = false;
+    try {
+      // Uint16Array → Buffer little-endian
+      const ownerBuf = Buffer.from(pixelOwners.buffer, pixelOwners.byteOffset, pixelOwners.byteLength);
+      fs.writeFileSync(PIXEL_OWNERS_FILE, ownerBuf);
+    } catch(e) { console.error('❌ pixel_owners.bin save:', e.message); }
+    try {
+      const idsArr = [];
+      for (const [username, id] of ownerIdMap.entries()) {
+        const data = ownerDataMap.get(id);
+        idsArr.push({ id, username, emoji: data?.emoji || '👾' });
+      }
+      fs.writeFileSync(PIXEL_IDS_FILE, JSON.stringify(idsArr));
+    } catch(e) { console.error('❌ pixel_owner_ids.json save:', e.message); }
+  }
 }
 
 async function saveSettings() {
@@ -666,6 +753,7 @@ initDatabases().then(() => {
 
         if (x >= 0 && x < CANVAS_WIDTH && y >= 0 && y < CANVAS_HEIGHT && colorIdx >= 0 && colorIdx < 32) {
           canvasData[y * CANVAS_WIDTH + x] = colorIdx;
+          setPixelOwner(x, y, acc.username, acc.emoji || '👾');
           pixelBatchBuffer.push({ x, y, c: colorIdx });
           isDirty = true;
 
@@ -892,10 +980,27 @@ initDatabases().then(() => {
           else wss.clients.forEach(c => { if (c !== ws && c.readyState === 1 && c.isAuthorized) c.send(msg); });
         }
 
+        else if (action === 'pixel_info') {
+          if (!ws.isAuthorized) return;
+          const px = data.x, py = data.y;
+          if (typeof px !== 'number' || typeof py !== 'number') return;
+          const owner = getPixelOwner(px, py);
+          ws.send(JSON.stringify({
+            action:   'pixel_info_result',
+            x:        px,
+            y:        py,
+            username: owner?.username || null,
+            emoji:    owner?.emoji    || null,
+          }));
+        }
+
         else if (action === 'save_emoji') {
           if (!ws.isAuthorized) return;
           ws.userData.emoji = data.emoji || '👾';
           await dbSaveAccount(ws.userData.username, { emoji: ws.userData.emoji });
+          // Обновим emoji в таблице авторов пикселей
+          const ownId = ownerIdMap.get(ws.userData.username);
+          if (ownId) ownerDataMap.set(ownId, { username: ws.userData.username, emoji: ws.userData.emoji });
           ws.send(JSON.stringify({ action:'toast', message:'Аватар сохранён!' }));
         }
 
@@ -1272,10 +1377,15 @@ initDatabases().then(() => {
             const { w: newW, h: newH } = data.params;
             if (newW > 0 && newH > 0 && newW <= 2048 && newH <= 2048) {
               const newCanvas = new Uint8Array(newW * newH);
+              const newOwners = new Uint16Array(newW * newH);
               const minW = Math.min(CANVAS_WIDTH, newW), minH = Math.min(CANVAS_HEIGHT, newH);
-              for (let y = 0; y < minH; y++) for (let x = 0; x < minW; x++) newCanvas[y*newW+x] = canvasData[y*CANVAS_WIDTH+x];
-              CANVAS_WIDTH = newW; CANVAS_HEIGHT = newH; CANVAS_SIZE = newW * newH; canvasData = newCanvas;
-              isDirty = true;
+              for (let y = 0; y < minH; y++) for (let x = 0; x < minW; x++) {
+                newCanvas[y*newW+x] = canvasData[y*CANVAS_WIDTH+x];
+                newOwners[y*newW+x] = pixelOwners ? pixelOwners[y*CANVAS_WIDTH+x] : 0;
+              }
+              CANVAS_WIDTH = newW; CANVAS_HEIGHT = newH; CANVAS_SIZE = newW * newH;
+              canvasData = newCanvas; pixelOwners = newOwners;
+              isDirty = true; ownersDirty = true;
               const msg = JSON.stringify({ action:'resize', w:newW, h:newH });
               wss.clients.forEach(c => { if (c.readyState===1&&c.isAuthorized) { c.send(msg); c.send(canvasData); } });
               ws.send(JSON.stringify({ action:'toast', message:`Холст изменён до ${newW}×${newH}` }));
@@ -1283,7 +1393,9 @@ initDatabases().then(() => {
           }
 
           else if (cmd === 'clear_canvas') {
-            canvasData.fill(0); isDirty = true;
+            canvasData.fill(0);
+            if (pixelOwners) pixelOwners.fill(0);
+            isDirty = true; ownersDirty = true;
             wss.clients.forEach(c => { if (c.readyState===1&&c.isAuthorized) c.send(canvasData); });
             ws.send(JSON.stringify({ action:'toast', message:'Холст очищен!' }));
           }
