@@ -404,6 +404,17 @@ setInterval(async () => {
 initDatabases().then(() => {
   const app = express();
   app.use(express.json({ limit: '20mb' }));
+
+  // CORS: фронтенд может быть открыт с другого домена (например GitHub Pages),
+  // поэтому разрешаем кросс-доменные запросы к /api/*.
+  app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') return res.sendStatus(204);
+    next();
+  });
+
   app.use(express.static(path.join(__dirname)));
 
   app.get('/', (req, res) => {
