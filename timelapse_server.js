@@ -171,23 +171,60 @@ async function getSnapshot(sessionId) {
  */
 async function getEvents(sessionId) {
   ensureR2();
-  // Получаем index чтобы узнать количество чанков
+
+  // Определяем количество чанков.
+  // Три источника, в порядке приоритета:
+  //   1. Активная сессия в памяти (запись ещё идёт)
+  //   2. sessions.json — список с метаданными (не всегда есть поле chunks)
+  //   3. index.json сессии (создаётся только при stopRecording)
+  // Если ни один не сработал — перебираем чанки напрямую.
   let totalChunks;
+
   if (session && session.id === sessionId) {
-    totalChunks = session.chunkIndex; // сколько уже загружено
+    // Запись идёт прямо сейчас
+    totalChunks = session.chunkIndex;
+    console.log(`[Timelapse] getEvents: активная сессия, чанков=${totalChunks}`);
   } else {
-    const idx = JSON.parse(await r2GetText(`timelapse/${sessionId}/index.json`));
-    totalChunks = idx.chunks;
+    // Пробуем sessions.json — он содержит поле chunks для завершённых сессий
+    try {
+      const list = JSON.parse(await r2GetText('timelapse/sessions.json'));
+      const entry = list.find(s => s.id === sessionId);
+      if (entry && typeof entry.chunks === 'number') {
+        totalChunks = entry.chunks;
+        console.log(`[Timelapse] getEvents: из sessions.json, чанков=${totalChunks}`);
+      }
+    } catch (_) { /* sessions.json нет или битый — не страшно */ }
+
+    // Если в sessions.json не нашли — пробуем index.json
+    if (typeof totalChunks === 'undefined') {
+      try {
+        const idx = JSON.parse(await r2GetText(`timelapse/${sessionId}/index.json`));
+        totalChunks = idx.chunks;
+        console.log(`[Timelapse] getEvents: из index.json, чанков=${totalChunks}`);
+      } catch (_) { /* index.json тоже нет */ }
+    }
+
+    // Последний шанс: перебираем чанки напрямую в R2
+    // (нужно если сессия была прервана без stopRecording)
+    if (typeof totalChunks === 'undefined') {
+      console.warn(`[Timelapse] getEvents: index.json не найден для ${sessionId}, сканируем чанки...`);
+      totalChunks = 0;
+      while (true) {
+        const key = `timelapse/${sessionId}/chunk_${String(totalChunks).padStart(4, '0')}.bin`;
+        try { await r2GetBytes(key); totalChunks++; }
+        catch (_) { break; }
+      }
+      console.log(`[Timelapse] getEvents: найдено чанков сканированием: ${totalChunks}`);
+    }
   }
 
-  if (totalChunks === 0) return Buffer.alloc(0);
+  if (!totalChunks || totalChunks === 0) return Buffer.alloc(0);
 
-  // Загружаем все чанки параллельно — критично для больших сессий,
-  // где последовательные запросы к R2 могут превысить таймаут сервера.
+  // Загружаем все чанки параллельно
   const keys = Array.from({ length: totalChunks }, (_, i) =>
     `timelapse/${sessionId}/chunk_${String(i).padStart(4, '0')}.bin`
   );
-  const parts = await Promise.all(keys.map(key => r2GetBytes(key)));
+  const parts = await Promise.all(keys.map(k => r2GetBytes(k)));
   return Buffer.concat(parts);
 }
 
