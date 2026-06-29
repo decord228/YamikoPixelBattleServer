@@ -1701,6 +1701,19 @@ initDatabases().then(() => {
             if (!tl) { ws.send(JSON.stringify({ action:'timelapse_status', recording: false })); return; }
             ws.send(JSON.stringify({ action:'timelapse_status', ...tl.getStatus() }));
           }
+
+          else if (cmd === 'timelapse_delete') {
+            try {
+              if (!tl) { ws.send(JSON.stringify({ action:'toast', message:'R2 не настроен' })); return; }
+              const sid = data.sessionId;
+              if (!sid) { ws.send(JSON.stringify({ action:'toast', message:'Не указан ID сессии' })); return; }
+              await tl.deleteSession(sid);
+              ws.send(JSON.stringify({ action:'timelapse_session_deleted', sessionId: sid }));
+              ws.send(JSON.stringify({ action:'toast', message:`🗑 Сессия удалена: ${sid}` }));
+            } catch(e) {
+              ws.send(JSON.stringify({ action:'toast', message:'❌ ' + e.message }));
+            }
+          }
         }
 
       } catch(e) {

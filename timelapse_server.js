@@ -15,9 +15,9 @@
 //    R2_BUCKET            — имя бакета (по умолч. "pixel-battle-timelapse")
 // ════════════════════════════════════════════════════════════
 
-let S3Client, PutObjectCommand, GetObjectCommand;
+let S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand;
 try {
-  ({ S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3'));
+  ({ S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3'));
 } catch (e) {
   console.warn('[Timelapse] ⚠ @aws-sdk/client-s3 не найден. Выполни: npm install @aws-sdk/client-s3');
 }
@@ -72,6 +72,10 @@ async function r2GetText(key) {
 async function r2GetBytes(key) {
   const resp = await r2.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
   return Buffer.from(await resp.Body.transformToByteArray());
+}
+
+async function r2Delete(key) {
+  await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
 }
 
 // ── Состояние ─────────────────────────────────────────────
@@ -182,6 +186,66 @@ async function getSessions() {
 async function getSnapshot(sessionId) {
   ensureR2();
   return r2GetBytes(`timelapse/${sessionId}/snapshot.bin`);
+}
+
+/**
+ * Удалить сессию полностью: snapshot.bin, index.json, все chunk_*.bin
+ * и запись из sessions.json.
+ * Нельзя удалить сессию, которая сейчас активно записывается —
+ * её нужно сначала остановить (stopRecording).
+ */
+async function deleteSession(sessionId) {
+  if (!ensureR2()) throw new Error('R2 не настроен');
+  if (session && session.id === sessionId) {
+    throw new Error('Нельзя удалить сессию, которая сейчас записывается. Сначала останови запись.');
+  }
+
+  // Определяем количество чанков, чтобы знать что удалять —
+  // те же fallback-уровни, что и в getEvents().
+  let totalChunks;
+  let listEntry = null;
+
+  try {
+    const list = JSON.parse(await r2GetText('timelapse/sessions.json'));
+    listEntry = list.find(s => s.id === sessionId) || null;
+    if (listEntry && typeof listEntry.chunks === 'number') totalChunks = listEntry.chunks;
+  } catch (_) {}
+
+  if (typeof totalChunks === 'undefined') {
+    try {
+      const idx = JSON.parse(await r2GetText(`timelapse/${sessionId}/index.json`));
+      totalChunks = idx.chunks;
+    } catch (_) {}
+  }
+
+  // Удаляем чанки. Если totalChunks неизвестен — сканируем и удаляем,
+  // пока не наткнёмся на отсутствующий файл.
+  let deletedChunks = 0;
+  if (typeof totalChunks === 'number') {
+    for (let i = 0; i < totalChunks; i++) {
+      const key = `timelapse/${sessionId}/chunk_${String(i).padStart(4, '0')}.bin`;
+      try { await r2Delete(key); deletedChunks++; } catch (_) {}
+    }
+  } else {
+    while (true) {
+      const key = `timelapse/${sessionId}/chunk_${String(deletedChunks).padStart(4, '0')}.bin`;
+      try {
+        await r2GetBytes(key); // проверяем что чанк существует
+        await r2Delete(key);
+        deletedChunks++;
+      } catch (_) { break; }
+    }
+  }
+
+  // Удаляем снапшот и index.json (не страшно, если их нет)
+  try { await r2Delete(`timelapse/${sessionId}/snapshot.bin`); } catch (_) {}
+  try { await r2Delete(`timelapse/${sessionId}/index.json`); } catch (_) {}
+
+  // Убираем запись из sessions.json
+  await _removeFromSessionList(sessionId);
+
+  console.log(`[Timelapse] 🗑 Удалена сессия ${sessionId} (${deletedChunks} чанков)`);
+  return { id: sessionId, deletedChunks };
 }
 
 /**
@@ -313,4 +377,13 @@ async function _updateSessionList(newEntry) {
   await r2Put('timelapse/sessions.json', JSON.stringify(list), 'application/json');
 }
 
-module.exports = { startRecording, stopRecording, recordPixel, recordPixelsBatch, getSessions, getSnapshot, getEvents, getStatus, isRecording };
+async function _removeFromSessionList(sessionId) {
+  let list = [];
+  try   { list = JSON.parse(await r2GetText('timelapse/sessions.json')); } catch { return; }
+  const filtered = list.filter(s => s.id !== sessionId);
+  if (filtered.length !== list.length) {
+    await r2Put('timelapse/sessions.json', JSON.stringify(filtered), 'application/json');
+  }
+}
+
+module.exports = { startRecording, stopRecording, recordPixel, recordPixelsBatch, getSessions, getSnapshot, getEvents, getStatus, isRecording, deleteSession };
