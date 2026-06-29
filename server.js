@@ -17,6 +17,11 @@ try { Redis      = require('@upstash/redis').Redis; }  catch(e) {}
 try { mongoose   = require('mongoose'); }              catch(e) {}
 try { cloudinary = require('cloudinary').v2; }         catch(e) {}
 
+let tl = null;
+try { tl = require('./timelapse_server'); } catch(e) {
+  console.warn('[Timelapse] timelapse_server.js не найден');
+}
+
 // ── CONFIG ─────────────────────────────────────────────────
 const PORT           = process.env.PORT || 3000;
 const ADMIN_USERNAME = 'Yamiko';
@@ -579,6 +584,57 @@ initDatabases().then(() => {
     }
   }
 
+  // ── TIMELAPSE ENDPOINTS ─────────────────────────────────
+  app.get('/api/timelapse/sessions', async (req, res) => {
+    try {
+      if (!tl) return res.json([]);
+      res.json(await tl.getSessions());
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+  app.get('/timelapse/sessions', async (req, res) => { // Discord proxy
+    try {
+      if (!tl) return res.json([]);
+      res.json(await tl.getSessions());
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Снапшот начального состояния холста для данной сессии
+  app.get('/api/timelapse/snapshot/:sessionId', async (req, res) => {
+    try {
+      if (!tl) return res.status(503).send('Timelapse не настроен');
+      const buf = await tl.getSnapshot(req.params.sessionId);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.send(buf);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+  app.get('/timelapse/snapshot/:sessionId', async (req, res) => {
+    try {
+      if (!tl) return res.status(503).send('Timelapse не настроен');
+      const buf = await tl.getSnapshot(req.params.sessionId);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.send(buf);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Все события сессии одним бинарным файлом
+  // (сервер читает чанки из R2 последовательно и стримит клиенту)
+  app.get('/api/timelapse/events/:sessionId', async (req, res) => {
+    try {
+      if (!tl) return res.status(503).send('Timelapse не настроен');
+      const buf = await tl.getEvents(req.params.sessionId);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.send(buf);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+  app.get('/timelapse/events/:sessionId', async (req, res) => {
+    try {
+      if (!tl) return res.status(503).send('Timelapse не настроен');
+      const buf = await tl.getEvents(req.params.sessionId);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.send(buf);
+    } catch(e) { res.status(500).json({ error: e.message }); }
+  });
+
   // ── WEB SOCKET ─────────────────────────────────────────
   const server = app.listen(PORT, () => {
     console.log(`🚀 Сервер запущен на порту ${PORT} (${CANVAS_WIDTH}×${CANVAS_HEIGHT})`);
@@ -756,6 +812,7 @@ initDatabases().then(() => {
           setPixelOwner(x, y, acc.username, acc.emoji || '👾');
           pixelBatchBuffer.push({ x, y, c: colorIdx });
           isDirty = true;
+          if (tl) tl.recordPixel(x, y, colorIdx);
 
           acc._lastPixel = { x, y };
           acc._lastColor = colorIdx;
@@ -1564,6 +1621,33 @@ initDatabases().then(() => {
               canvas_h:     CANVAS_HEIGHT,
               cooldown_ms:  serverSettings.cooldownMs,
             }));
+          }
+
+          else if (cmd === 'timelapse_start') {
+            try {
+              if (!tl) { ws.send(JSON.stringify({ action:'toast', message:'R2 / timelapse_server.js не настроен' })); return; }
+              const id = await tl.startRecording(canvasData, CANVAS_WIDTH, CANVAS_HEIGHT);
+              ws.send(JSON.stringify({ action:'timelapse_status', ...tl.getStatus() }));
+              ws.send(JSON.stringify({ action:'toast', message:`▶ Запись начата: ${id}` }));
+            } catch(e) {
+              ws.send(JSON.stringify({ action:'toast', message:'❌ ' + e.message }));
+            }
+          }
+
+          else if (cmd === 'timelapse_stop') {
+            try {
+              if (!tl) { ws.send(JSON.stringify({ action:'toast', message:'R2 не настроен' })); return; }
+              const info = await tl.stopRecording();
+              ws.send(JSON.stringify({ action:'timelapse_status', recording: false }));
+              ws.send(JSON.stringify({ action:'toast', message:`■ Запись остановлена. Событий: ${info.totalEvents}` }));
+            } catch(e) {
+              ws.send(JSON.stringify({ action:'toast', message:'❌ ' + e.message }));
+            }
+          }
+
+          else if (cmd === 'timelapse_status') {
+            if (!tl) { ws.send(JSON.stringify({ action:'timelapse_status', recording: false })); return; }
+            ws.send(JSON.stringify({ action:'timelapse_status', ...tl.getStatus() }));
           }
         }
 
