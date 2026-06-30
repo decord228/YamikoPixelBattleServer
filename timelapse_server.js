@@ -26,11 +26,20 @@ const BUCKET = process.env.R2_BUCKET || 'pixel-battle-timelapse';
 
 // ── Бинарный формат события: 9 байт ───────────────────────
 //  Offset  Size  Поле
-//    0      2    x  (uint16 BE, 0–65535)
-//    2      2    y  (uint16 BE, 0–65535)
-//    4      1    colorIdx (uint8, 0–31)
+//    0      2    x  (uint16 BE, 0–65535)           [resize: newW]
+//    2      2    y  (uint16 BE, 0–65535)           [resize: newH]
+//    4      1    colorIdx (uint8, 0–31)             — 0xFF = служебное событие RESIZE
 //    5      4    ms с начала сессии (uint32 BE, max ~49 дней)
 // Итого: 9 B × 1 000 000 событий = 9 МБ (удобно читается DataView на клиенте)
+//
+// Служебное событие RESIZE (colorIdx===0xFF) позволяет менять размер холста
+// ВНУТРИ одной и той же сессии — без необходимости останавливать запись и
+// начинать новую. Поля x/y в этом случае несут newW/newH, а не координаты.
+// Это единственное, что нужно клиенту, чтобы корректно перестроить tlFrame
+// (старые пиксели сохраняются в левом верхнем углу, новая область — белая)
+// в момент воспроизведения, когда он доходит до этого timestamp.
+
+const RESIZE_SENTINEL = 0xFF;
 
 function encodeEvent(x, y, c, offsetMs) {
   const b = Buffer.allocUnsafe(9);
@@ -39,6 +48,10 @@ function encodeEvent(x, y, c, offsetMs) {
   b[4] = c;
   b.writeUInt32BE(offsetMs >>> 0, 5); // >>>0 = clamp to uint32
   return b;
+}
+
+function encodeResizeEvent(newW, newH, offsetMs) {
+  return encodeEvent(newW, newH, RESIZE_SENTINEL, offsetMs);
 }
 
 // ── R2 клиент ─────────────────────────────────────────────
@@ -109,7 +122,7 @@ async function startRecording(canvasData, canvasW, canvasH) {
   header.writeUInt16BE(canvasH, 2);
   await r2Put(`timelapse/${id}/snapshot.bin`, Buffer.concat([header, Buffer.from(canvasData)]));
 
-  session = { id, startedAt: Date.now(), buffer: [], chunkIndex: 0, totalEvents: 0 };
+  session = { id, startedAt: Date.now(), buffer: [], chunkIndex: 0, totalEvents: 0, w: canvasW, h: canvasH, currentW: canvasW, currentH: canvasH };
   flushTimer = setInterval(_flushBuffer, FLUSH_EVERY_MS);
 
   console.log(`[Timelapse] ▶  Начата запись: ${id}`);
@@ -148,6 +161,24 @@ function recordPixelsBatch(pixels) {
 }
 
 /**
+ * Записать изменение размера холста ВНУТРИ текущей сессии (без её закрытия).
+ * Сохраняет currentW/currentH в самой сессии, чтобы getStatus()/index.json
+ * отражали актуальный размер, и пишет служебное событие RESIZE в буфер —
+ * клиент при воспроизведении применит его в нужный момент времени.
+ */
+function recordResize(newW, newH) {
+  if (!session) return;
+  const offsetMs = Math.min(Date.now() - session.startedAt, 0xFFFFFFFF);
+  session.buffer.push(encodeResizeEvent(newW, newH, offsetMs));
+  session.totalEvents++;
+  session.currentW = newW;
+  session.currentH = newH;
+  if (session.buffer.length >= FLUSH_EVERY_EVENTS) {
+    _flushBuffer().catch(e => console.error('[Timelapse] flush error:', e.message));
+  }
+}
+
+/**
  * Остановить запись. Финальный flush + index.json + обновление списка сессий.
  * Итого: +2 Class A ops при остановке.
  */
@@ -165,6 +196,10 @@ async function stopRecording() {
     stoppedAt:   Date.now(),
     totalEvents: s.totalEvents,
     chunks:      s.chunkIndex,
+    w:           s.w,          // размер холста НА МОМЕНТ НАЧАЛА записи (соответствует snapshot.bin)
+    h:           s.h,
+    finalW:      s.currentW,   // размер холста на момент остановки (после всех resize-событий внутри сессии)
+    finalH:      s.currentH,
   };
 
   await r2Put(`timelapse/${s.id}/index.json`, JSON.stringify(index), 'application/json');
@@ -330,6 +365,8 @@ function getStatus() {
     buffered:    session.buffer.length,
     totalEvents: session.totalEvents,
     flushed:     session.chunkIndex,
+    w:           session.currentW,
+    h:           session.currentH,
   };
 }
 
@@ -386,4 +423,4 @@ async function _removeFromSessionList(sessionId) {
   }
 }
 
-module.exports = { startRecording, stopRecording, recordPixel, recordPixelsBatch, getSessions, getSnapshot, getEvents, getStatus, isRecording, deleteSession };
+module.exports = { startRecording, stopRecording, recordPixel, recordPixelsBatch, recordResize, getSessions, getSnapshot, getEvents, getStatus, isRecording, deleteSession };
