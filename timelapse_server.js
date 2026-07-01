@@ -98,6 +98,16 @@ const FLUSH_EVERY_EVENTS  = 10_000;         // или если буфер наб
 
 let session     = null; // активная сессия
 let flushTimer  = null;
+
+// Ключ в R2, где хранится "живое" состояние текущей записи (id/chunkIndex/
+// totalEvents/размеры). Обновляется при старте записи и после каждого
+// успешного flush. Нужен, чтобы после падения/рестарта процесса (напр.
+// деплой на Render) сервер мог ПРОДОЛЖИТЬ ту же сессию, а не молча терять
+// запись — раньше session хранился только в памяти и рестарт сервера
+// останавливал запись без явной остановки (stopRecording ни разу не
+// вызывался, поэтому не создавался даже index.json — сессия просто "висела"
+// недописанной в R2 и пропадала из истории).
+const ACTIVE_SESSION_KEY = 'timelapse/active_session.json';
 // Promise-цепочка для сериализации флашей: предотвращает race condition,
 // когда два flush запускаются одновременно и оба читают одинаковый chunkIndex
 // до того как первый успел его инкрементировать (await r2Put).
@@ -124,9 +134,64 @@ async function startRecording(canvasData, canvasW, canvasH) {
 
   session = { id, startedAt: Date.now(), buffer: [], chunkIndex: 0, totalEvents: 0, w: canvasW, h: canvasH, currentW: canvasW, currentH: canvasH };
   flushTimer = setInterval(_flushBuffer, FLUSH_EVERY_MS);
+  await _persistActiveSession();
 
   console.log(`[Timelapse] ▶  Начата запись: ${id}`);
   return id;
+}
+
+/**
+ * Восстановить запись после рестарта сервера. Вызывается один раз при
+ * старте процесса. Если в R2 лежит "живая" сессия (сервер упал/перезапустился
+ * до stopRecording) — поднимаем её в память и продолжаем флашить новые чанки
+ * с того же chunkIndex, вместо того чтобы молча считать запись остановленной.
+ * Буфер событий, не успевших зафлашиться до рестарта (максимум
+ * FLUSH_EVERY_EVENTS штук или события за последние FLUSH_EVERY_MS), теряется —
+ * это неизбежно при потере процесса в памяти, но сама сессия не обрывается.
+ */
+async function resumeRecording() {
+  if (session) return true; // уже что-то пишем — ничего восстанавливать не нужно
+  if (!ensureR2()) return false;
+  let saved;
+  try {
+    saved = JSON.parse(await r2GetText(ACTIVE_SESSION_KEY));
+  } catch (_) {
+    return false; // активной сессии нет — это нормальное состояние
+  }
+  if (!saved || !saved.id) return false;
+
+  session = {
+    id: saved.id,
+    startedAt: saved.startedAt,
+    buffer: [],
+    chunkIndex: saved.chunkIndex || 0,
+    totalEvents: saved.totalEvents || 0,
+    w: saved.w,
+    h: saved.h,
+    currentW: saved.currentW || saved.w,
+    currentH: saved.currentH || saved.h,
+  };
+  flushTimer = setInterval(_flushBuffer, FLUSH_EVERY_MS);
+  console.log(`[Timelapse] ↻ Запись восстановлена после рестарта сервера: ${session.id} (уже сохранено чанков: ${session.chunkIndex}, событий: ${session.totalEvents})`);
+  return true;
+}
+
+async function _persistActiveSession() {
+  if (!session) return;
+  try {
+    await r2Put(ACTIVE_SESSION_KEY, JSON.stringify({
+      id: session.id,
+      startedAt: session.startedAt,
+      chunkIndex: session.chunkIndex,
+      totalEvents: session.totalEvents,
+      w: session.w,
+      h: session.h,
+      currentW: session.currentW,
+      currentH: session.currentH,
+    }), 'application/json');
+  } catch (e) {
+    console.error('[Timelapse] ⚠ Не удалось сохранить состояние активной записи:', e.message);
+  }
 }
 
 /**
@@ -173,6 +238,7 @@ function recordResize(newW, newH) {
   session.totalEvents++;
   session.currentW = newW;
   session.currentH = newH;
+  _persistActiveSession().catch(() => {}); // fire-and-forget, не блокируем resize
   if (session.buffer.length >= FLUSH_EVERY_EVENTS) {
     _flushBuffer().catch(e => console.error('[Timelapse] flush error:', e.message));
   }
@@ -204,6 +270,7 @@ async function stopRecording() {
 
   await r2Put(`timelapse/${s.id}/index.json`, JSON.stringify(index), 'application/json');
   await _updateSessionList(index);
+  try { await r2Delete(ACTIVE_SESSION_KEY); } catch (_) {}
 
   session = null;
   console.log(`[Timelapse] ■  Остановлена: ${s.id} (${index.totalEvents} событий, ${index.chunks} чанков)`);
@@ -397,6 +464,7 @@ async function _doFlush() {
     if (!session) return; // stopRecording() вызвали пока мы ждали r2Put
     const savedIdx = session.chunkIndex;
     session.chunkIndex++;
+    await _persistActiveSession();
     console.log(`[Timelapse] ↑ chunk_${savedIdx} → ${events.length} событий (${(events.length * 9 / 1024).toFixed(1)} КБ)`);
   } catch (e) {
     // Не потеряем данные — вернём в начало буфера
@@ -423,4 +491,4 @@ async function _removeFromSessionList(sessionId) {
   }
 }
 
-module.exports = { startRecording, stopRecording, recordPixel, recordPixelsBatch, recordResize, getSessions, getSnapshot, getEvents, getStatus, isRecording, deleteSession };
+module.exports = { startRecording, resumeRecording, stopRecording, recordPixel, recordPixelsBatch, recordResize, getSessions, getSnapshot, getEvents, getStatus, isRecording, deleteSession };

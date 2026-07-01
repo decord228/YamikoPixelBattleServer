@@ -581,7 +581,20 @@ setInterval(async () => {
 //  HTTP + WEBSOCKET SERVER
 // ════════════════════════════════════════════════════════════
 
-initDatabases().then(() => {
+initDatabases().then(async () => {
+  // Если сервер упал/перезапустился (деплой, краш) во время записи тайм-лапса,
+  // session хранился только в памяти и терялся — запись "тихо" останавливалась
+  // без вызова stopRecording() и без явного уведомления. Пытаемся восстановить
+  // её из R2 до того, как начнём принимать соединения.
+  if (tl && tl.resumeRecording) {
+    try {
+      const resumed = await tl.resumeRecording();
+      if (resumed) console.log('[Timelapse] Запись восстановлена после рестарта сервера');
+    } catch (e) {
+      console.error('[Timelapse] Ошибка восстановления записи после рестарта:', e.message);
+    }
+  }
+
   const app = express();
   app.use(express.json({ limit: '20mb' }));
 
@@ -1475,7 +1488,21 @@ initDatabases().then(() => {
         //  ADMIN COMMANDS
         // ══════════════════════════════════════════════════
         else if (action === 'admin_cmd') {
-          if (!ws.isAuthorized || ws.userData?.role !== 'admin') {
+          if (!ws.isAuthorized) return;
+
+          // timelapse_status — не админ-действие, а read-only статус для
+          // индикатора записи в топ-баре, который должен быть виден ВСЕМ
+          // залогиненным пользователям, а не только админам. Раньше этот
+          // запрос от обычных пользователей отклонялся общим admin-гейтом
+          // ниже ("Нет прав доступа"), поэтому иконка записи у них никогда
+          // не появлялась. Обрабатываем его до проверки роли.
+          if (data.cmd === 'timelapse_status') {
+            if (!tl) { ws.send(JSON.stringify({ action:'timelapse_status', recording: false })); return; }
+            ws.send(JSON.stringify({ action:'timelapse_status', ...tl.getStatus() }));
+            return;
+          }
+
+          if (ws.userData?.role !== 'admin') {
             ws.send(JSON.stringify({ action:'toast', message:'Нет прав доступа.' })); return;
           }
           const cmd = data.cmd;
@@ -1851,7 +1878,10 @@ initDatabases().then(() => {
             try {
               if (!tl) { ws.send(JSON.stringify({ action:'toast', message:'R2 / timelapse_server.js не настроен' })); return; }
               const id = await tl.startRecording(canvasData, CANVAS_WIDTH, CANVAS_HEIGHT);
-              ws.send(JSON.stringify({ action:'timelapse_status', ...tl.getStatus() }));
+              // Рассылаем всем залогиненным пользователям, а не только админу,
+              // который нажал "Начать" — иначе индикатор в топ-баре у остальных
+              // обновится только при следующем 15-секундном опросе.
+              broadcastAll(JSON.stringify({ action:'timelapse_status', ...tl.getStatus() }));
               ws.send(JSON.stringify({ action:'toast', message:`▶ Запись начата: ${id}` }));
             } catch(e) {
               ws.send(JSON.stringify({ action:'toast', message:'❌ ' + e.message }));
@@ -1862,16 +1892,11 @@ initDatabases().then(() => {
             try {
               if (!tl) { ws.send(JSON.stringify({ action:'toast', message:'R2 не настроен' })); return; }
               const info = await tl.stopRecording();
-              ws.send(JSON.stringify({ action:'timelapse_status', recording: false }));
+              broadcastAll(JSON.stringify({ action:'timelapse_status', recording: false }));
               ws.send(JSON.stringify({ action:'toast', message:`■ Запись остановлена. Событий: ${info.totalEvents}` }));
             } catch(e) {
               ws.send(JSON.stringify({ action:'toast', message:'❌ ' + e.message }));
             }
-          }
-
-          else if (cmd === 'timelapse_status') {
-            if (!tl) { ws.send(JSON.stringify({ action:'timelapse_status', recording: false })); return; }
-            ws.send(JSON.stringify({ action:'timelapse_status', ...tl.getStatus() }));
           }
 
           else if (cmd === 'timelapse_delete') {
