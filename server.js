@@ -203,6 +203,12 @@ if (mongoose) {
     // у него всегда системное звание 'leader', вычисляется по clan.leader).
     ranks:          { type: Array,  default: null },
     member_roles:   { type: Object, default: {} },
+
+    // ── КАЗНА И МАГАЗИН КЛАНА ──
+    treasury:       { type: Number, default: 0 },
+    treasury_log:   { type: Array,  default: [] }, // [{username, amount, text, time}]
+    shop_items:     { type: [String], default: [] }, // купленные id из CLAN_SHOP_ITEMS/CLAN_MEMBER_LIMIT_TIERS
+    member_limit:   { type: Number, default: 5 },
   }, { timestamps: true, autoIndex: false });
 
   const TemplateSchema = new mongoose.Schema({
@@ -299,9 +305,37 @@ async function dbGetAllAccounts() {
   return Object.entries(accounts).map(([username, v]) => ({ username, ...v }));
 }
 
+// ── МАГАЗИН КЛАНА ──
+// Ключи id ниже должны 1-в-1 совпадать с CLAN_SHOP_ITEMS / CLAN_MEMBER_LIMIT_TIERS
+// на клиенте (config.js), т.к. они хранятся в clan.shop_items[].
+const CLAN_BASE_MEMBER_LIMIT = 5;
+
+const CLAN_MEMBER_LIMIT_TIERS = [
+  { id:'members_10',  limit:10,  cost:100  },
+  { id:'members_25',  limit:25,  cost:300  },
+  { id:'members_50',  limit:50,  cost:1000 },
+  { id:'members_100', limit:100, cost:5000 },
+];
+
+const CLAN_SHOP_ITEMS = [
+  { id:'banner_static',   cost:200, requires:null },
+  { id:'banner_animated', cost:500, requires:'banner_static' },
+];
+
+const CLAN_ANIMATED_BANNER_EXT = ['.gif', '.webp', '.apng'];
+function isAnimatedBannerUrl(url) {
+  if (!url) return false;
+  const clean = url.split('?')[0].toLowerCase();
+  return CLAN_ANIMATED_BANNER_EXT.some(ext => clean.endsWith(ext));
+}
+
+function clanCurrentMemberLimit(clan) {
+  return (clan && clan.member_limit) || CLAN_BASE_MEMBER_LIMIT;
+}
+
 // ── СИСТЕМА ЗВАНИЙ / ПРАВ КЛАНА ──
 // Права, которые можно выдать званию. Ключи должны совпадать с CLAN_PERMISSIONS на клиенте.
-const CLAN_PERMISSION_KEYS = ['invite', 'kick', 'manage_ranks', 'manage_settings', 'manage_stencil', 'edit_motd'];
+const CLAN_PERMISSION_KEYS = ['invite', 'kick', 'manage_ranks', 'manage_settings', 'manage_stencil', 'edit_motd', 'manage_treasury'];
 
 function emptyClanPermissions() {
   const p = {}; for (const k of CLAN_PERMISSION_KEYS) p[k] = false; return p;
@@ -312,7 +346,7 @@ function defaultClanRanks() {
     {
       id: 'leader', name: 'Лидер', icon: '👑', color: '#fbbf24', priority: 100,
       isLeader: true, isDefault: true,
-      permissions: { invite: true, kick: true, manage_ranks: true, manage_settings: true, manage_stencil: true, edit_motd: true },
+      permissions: { invite: true, kick: true, manage_ranks: true, manage_settings: true, manage_stencil: true, edit_motd: true, manage_treasury: true },
     },
     {
       id: 'member', name: 'Участник', icon: '⚔️', color: '#818cf8', priority: 0,
@@ -1306,7 +1340,8 @@ initDatabases().then(async () => {
              join_requests:[], pixels:0, share_cursor:false, active_stencil:null, shared_stencil:null,
              icon: '🏴', tag_color: '#818cf8', join_type: 'open', min_pixels: 0, is_public: true, social_link: '',
              banner_url: null, banner_crop_x: 0, banner_crop_y: 0, banner_crop_w: 1, banner_crop_h: 1,
-             ranks: defaultClanRanks(), member_roles: {}
+             ranks: defaultClanRanks(), member_roles: {},
+             treasury: 0, treasury_log: [], shop_items: [], member_limit: CLAN_BASE_MEMBER_LIMIT
           });
           ws.send(JSON.stringify({ action:'clan_update', clan: await dbGetClan(name), coins: ws.userData.coins, message:`Клан "${name}" создан!` }));
         }
@@ -1321,6 +1356,7 @@ initDatabases().then(async () => {
           
           if (clan.join_type === 'closed') { ws.send(JSON.stringify({ action:'toast', message:'Вступление в клан закрыто' })); return; }
           if ((acc.pixels || 0) < (clan.min_pixels || 0)) { ws.send(JSON.stringify({ action:'toast', message:`Нужно минимум ${clan.min_pixels} пикселей` })); return; }
+          if ((clan.members||[]).length >= clanCurrentMemberLimit(clan)) { ws.send(JSON.stringify({ action:'toast', message:'Клан заполнен — достигнут лимит участников' })); return; }
           
           if (clan.join_type === 'request') {
              if ((clan.join_requests||[]).includes(ws.userData.username)) { ws.send(JSON.stringify({ action:'toast', message:'Заявка уже отправлена' })); return; }
@@ -1346,22 +1382,32 @@ initDatabases().then(async () => {
 
           const settings = data.settings || {};
 
-          // ── Смена баннера клана платная (200 монет за установку нового баннера) ──
-          // Списываем только когда баннер реально меняется на новый (не при снятии
-          // и не при повторном сохранении настроек с тем же баннером).
+          // ── Баннер клана доступен только после покупки в «Магазине клана» ──
+          // banner_static открывает статичные баннеры (jpg/png/webp-статик),
+          // banner_animated — дополнительно открывает анимированные (gif/webp/apng).
+          // Сама смена баннера бесплатна — платится один раз за товар в магазине.
           const newBannerUrl = settings.banner_url || null;
-          const bannerChanged = newBannerUrl && newBannerUrl !== (clan.banner_url || null);
-          const BANNER_COST = 200;
+          const bannerChanged = newBannerUrl !== (clan.banner_url || null);
+          let finalBannerUrl = clan.banner_url || null;
+          let finalCropX = clan.banner_crop_x ?? 0, finalCropY = clan.banner_crop_y ?? 0,
+              finalCropW = clan.banner_crop_w ?? 1, finalCropH = clan.banner_crop_h ?? 1;
+
           if (bannerChanged) {
-            const acc = await dbGetAccount(ws.userData.username);
-            if ((acc.coins || 0) < BANNER_COST) {
-              ws.send(JSON.stringify({ action:'toast', message:`Нужно ${BANNER_COST} монет, чтобы установить баннер клана!` }));
-              return;
+            const owned = clan.shop_items || [];
+            if (!newBannerUrl) {
+              // Снятие баннера — всегда разрешено.
+              finalBannerUrl = null;
+            } else if (isAnimatedBannerUrl(newBannerUrl) && !owned.includes('banner_animated')) {
+              ws.send(JSON.stringify({ action:'toast', message:'Анимированный баннер нужно купить в магазине клана (500 монет)' }));
+            } else if (!isAnimatedBannerUrl(newBannerUrl) && !owned.includes('banner_static') && !owned.includes('banner_animated')) {
+              ws.send(JSON.stringify({ action:'toast', message:'Баннер клана нужно купить в магазине клана (200 монет)' }));
+            } else {
+              finalBannerUrl = newBannerUrl;
+              finalCropX = Number.isFinite(Number(settings.banner_crop_x)) ? Math.max(0, Math.min(1, Number(settings.banner_crop_x))) : 0;
+              finalCropY = Number.isFinite(Number(settings.banner_crop_y)) ? Math.max(0, Math.min(1, Number(settings.banner_crop_y))) : 0;
+              finalCropW = Number.isFinite(Number(settings.banner_crop_w)) ? Math.max(0.02, Math.min(1, Number(settings.banner_crop_w))) : 1;
+              finalCropH = Number.isFinite(Number(settings.banner_crop_h)) ? Math.max(0.02, Math.min(1, Number(settings.banner_crop_h))) : 1;
             }
-            const newCoinsAfterBanner = (acc.coins || 0) - BANNER_COST;
-            await dbSaveAccount(ws.userData.username, { coins: newCoinsAfterBanner });
-            ws.userData.coins = newCoinsAfterBanner;
-            ws.send(JSON.stringify({ action:'coins_update', coins: newCoinsAfterBanner, pixels: acc.pixels || 0 }));
           }
 
           const update = {
@@ -1373,11 +1419,11 @@ initDatabases().then(async () => {
              share_cursor: !!settings.share_cursor,
              social_link: settings.social_link || '',
              message_of_day: (settings.message_of_day || '').slice(0, 200),
-             banner_url: settings.banner_url || null,
-             banner_crop_x: Number.isFinite(Number(settings.banner_crop_x)) ? Math.max(0, Math.min(1, Number(settings.banner_crop_x))) : 0,
-             banner_crop_y: Number.isFinite(Number(settings.banner_crop_y)) ? Math.max(0, Math.min(1, Number(settings.banner_crop_y))) : 0,
-             banner_crop_w: Number.isFinite(Number(settings.banner_crop_w)) ? Math.max(0.02, Math.min(1, Number(settings.banner_crop_w))) : 1,
-             banner_crop_h: Number.isFinite(Number(settings.banner_crop_h)) ? Math.max(0.02, Math.min(1, Number(settings.banner_crop_h))) : 1,
+             banner_url: finalBannerUrl,
+             banner_crop_x: finalCropX,
+             banner_crop_y: finalCropY,
+             banner_crop_w: finalCropW,
+             banner_crop_h: finalCropH,
           };
           
           await dbSaveClan(ws.userData.clan, update);
@@ -1385,6 +1431,105 @@ initDatabases().then(async () => {
           broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_data', clan: newClanData }), null);
           broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_settings_update', share_cursor: update.share_cursor }), null);
           ws.send(JSON.stringify({ action:'toast', message:'Настройки клана сохранены', type:'success' }));
+        }
+
+        // ── МАГАЗИН КЛАНА: покупка баннеров / расширения лимита участников ──
+        // Покупки оплачиваются ТОЛЬКО из казны клана (валюта клана), доступно
+        // только участникам с правом «Казна» (manage_treasury).
+        else if (action === 'clan_shop_buy') {
+          if (!ws.isAuthorized || !ws.userData.clan) return;
+          const clan = await dbGetClan(ws.userData.clan);
+          if (!clan) return;
+          if (!clanHasPerm(clan, ws.userData.username, 'manage_treasury')) {
+            ws.send(JSON.stringify({ action:'toast', message:'Нет права «Казна» для покупок в магазине клана' })); return;
+          }
+
+          const itemId = data.item_id;
+          const owned  = clan.shop_items || [];
+
+          const bannerItem = CLAN_SHOP_ITEMS.find(i => i.id === itemId);
+          const tierItem    = CLAN_MEMBER_LIMIT_TIERS.find(t => t.id === itemId);
+          const item = bannerItem || tierItem;
+          if (!item) { ws.send(JSON.stringify({ action:'toast', message:'Товар не найден' })); return; }
+          if (owned.includes(itemId)) { ws.send(JSON.stringify({ action:'toast', message:'Уже куплено' })); return; }
+
+          if (bannerItem) {
+            if (bannerItem.requires && !owned.includes(bannerItem.requires)) {
+              ws.send(JSON.stringify({ action:'toast', message:'Сначала купите предыдущий товар' })); return;
+            }
+          } else {
+            // Тир лимита участников можно купить только по порядку (нельзя перескочить).
+            const curLimit = clanCurrentMemberLimit(clan);
+            const sorted = [...CLAN_MEMBER_LIMIT_TIERS].sort((a,b) => a.limit - b.limit);
+            const nextTier = sorted.find(t => t.limit > curLimit);
+            if (!nextTier || nextTier.id !== itemId) {
+              ws.send(JSON.stringify({ action:'toast', message:'Тиры лимита участников покупаются по порядку' })); return;
+            }
+          }
+
+          if ((clan.treasury || 0) < item.cost) {
+            ws.send(JSON.stringify({ action:'toast', message:'В казне клана недостаточно монет' })); return;
+          }
+          const newTreasury = (clan.treasury || 0) - item.cost;
+          const log = [{ username: ws.userData.username, amount: -item.cost, text: `${ws.userData.username} купил(а) товар клана за ${item.cost}🪙`, time: Date.now() }, ...(clan.treasury_log || [])].slice(0, 200);
+          const newShopItems = [...owned, itemId];
+          const patch = { treasury: newTreasury, treasury_log: log, shop_items: newShopItems };
+          if (tierItem) patch.member_limit = tierItem.limit;
+          await dbSaveClan(ws.userData.clan, patch);
+
+          const freshClan = await dbGetClan(ws.userData.clan);
+          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_data', clan: freshClan }), null);
+          ws.send(JSON.stringify({ action:'toast', message: tierItem ? `Лимит участников увеличен до ${tierItem.limit}!` : 'Покупка совершена!', type:'success' }));
+        }
+
+        // ── КАЗНА КЛАНА: пополнение (доступно всем участникам) ──
+        else if (action === 'clan_treasury_deposit') {
+          if (!ws.isAuthorized || !ws.userData.clan) return;
+          const amount = Math.floor(Number(data.amount));
+          if (!Number.isFinite(amount) || amount <= 0) { ws.send(JSON.stringify({ action:'toast', message:'Некорректная сумма' })); return; }
+          const clan = await dbGetClan(ws.userData.clan);
+          if (!clan) return;
+          const acc = await dbGetAccount(ws.userData.username);
+          if ((acc.coins || 0) < amount) { ws.send(JSON.stringify({ action:'toast', message:'Недостаточно монет' })); return; }
+
+          const newCoins = (acc.coins || 0) - amount;
+          await dbSaveAccount(ws.userData.username, { coins: newCoins });
+          ws.userData.coins = newCoins;
+          ws.send(JSON.stringify({ action:'coins_update', coins: newCoins, pixels: acc.pixels || 0 }));
+
+          const newTreasury = (clan.treasury || 0) + amount;
+          const log = [{ username: ws.userData.username, amount, text: `${ws.userData.username} пополнил(а) казну на ${amount}🪙`, time: Date.now() }, ...(clan.treasury_log || [])].slice(0, 200);
+          await dbSaveClan(ws.userData.clan, { treasury: newTreasury, treasury_log: log });
+
+          const freshClan = await dbGetClan(ws.userData.clan);
+          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_data', clan: freshClan }), null);
+          ws.send(JSON.stringify({ action:'toast', message:`Казна пополнена на ${amount}🪙`, type:'success' }));
+        }
+
+        // ── КАЗНА КЛАНА: снятие (только по праву manage_treasury) ──
+        else if (action === 'clan_treasury_withdraw') {
+          if (!ws.isAuthorized || !ws.userData.clan) return;
+          const amount = Math.floor(Number(data.amount));
+          if (!Number.isFinite(amount) || amount <= 0) { ws.send(JSON.stringify({ action:'toast', message:'Некорректная сумма' })); return; }
+          const clan = await dbGetClan(ws.userData.clan);
+          if (!clan || !clanHasPerm(clan, ws.userData.username, 'manage_treasury')) {
+            ws.send(JSON.stringify({ action:'toast', message:'Нет права «Казна» для снятия средств' })); return;
+          }
+          if ((clan.treasury || 0) < amount) { ws.send(JSON.stringify({ action:'toast', message:'В казне недостаточно монет' })); return; }
+
+          const newTreasury = (clan.treasury || 0) - amount;
+          const log = [{ username: ws.userData.username, amount: -amount, text: `${ws.userData.username} снял(а) ${amount}🪙 из казны`, time: Date.now() }, ...(clan.treasury_log || [])].slice(0, 200);
+          await dbSaveClan(ws.userData.clan, { treasury: newTreasury, treasury_log: log });
+
+          const acc = await dbGetAccount(ws.userData.username);
+          const newCoins = (acc.coins || 0) + amount;
+          await dbSaveAccount(ws.userData.username, { coins: newCoins });
+          ws.userData.coins = newCoins;
+          ws.send(JSON.stringify({ action:'coins_update', coins: newCoins, pixels: acc.pixels || 0 }));
+
+          const freshClan = await dbGetClan(ws.userData.clan);
+          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_data', clan: freshClan }), null);
+          ws.send(JSON.stringify({ action:'toast', message:`Снято ${amount}🪙 из казны`, type:'success' }));
         }
 
         else if (action === 'clan_set_motd') {
@@ -1409,6 +1554,7 @@ initDatabases().then(async () => {
           const target = data.username;
           const clan = await dbGetClan(ws.userData.clan);
           if (!clan || !clanHasPerm(clan, ws.userData.username, 'invite')) return;
+          if ((clan.members||[]).length >= clanCurrentMemberLimit(clan)) { ws.send(JSON.stringify({ action:'toast', message:'Клан заполнен — достигнут лимит участников' })); return; }
           const requests = (clan.join_requests||[]).filter(r => r !== target);
           const newMembers = [...(clan.members||[]), target];
           await dbSaveClan(ws.userData.clan, { members: newMembers, join_requests: requests });
@@ -1849,6 +1995,8 @@ initDatabases().then(async () => {
             ws.send(JSON.stringify({ action:'admin_clans_list', clans: allClans.map(c => ({
               name: c.name, tag: c.tag||'', tag_color: c.tag_color||'#818cf8', icon: c.icon||'🏴',
               leader: c.leader||'', members: (c.members||[]).length, pixels: c.pixels||0, is_public: c.is_public!==false,
+              description: c.description||'', banner_url: c.banner_url||null, treasury: c.treasury||0,
+              member_limit: c.member_limit || CLAN_BASE_MEMBER_LIMIT,
             })) }));
           }
 
@@ -1867,6 +2015,63 @@ initDatabases().then(async () => {
               });
               ws.send(JSON.stringify({ action:'toast', message:`Клан "${name}" удалён` }));
             }
+          }
+
+          // ── АДМИН: редактирование клана (название/тег/описание) — для модерации ──
+          else if (cmd === 'edit_clan') {
+            const p = data.params || {};
+            const name = p.name;
+            const clan = await dbGetClan(name);
+            if (!clan) { ws.send(JSON.stringify({ action:'toast', message:'Клан не найден' })); return; }
+
+            const patch = {};
+            if (typeof p.tag === 'string') patch.tag = p.tag.slice(0, 4);
+            if (typeof p.description === 'string') patch.description = p.description.slice(0, 200);
+
+            // Переименование клана: имя — уникальный ключ, поэтому нужно перенести
+            // запись под новым именем и обновить ссылку clan у всех участников.
+            if (p.new_name && p.new_name !== name) {
+              const newName = String(p.new_name).slice(0, 24);
+              const clash = await dbGetClan(newName);
+              if (clash) { ws.send(JSON.stringify({ action:'toast', message:`Клан «${newName}» уже существует` })); return; }
+
+              const merged = { ...clan, ...patch, name: newName };
+              await dbSaveClan(newName, merged);
+              await dbDeleteClan(name);
+
+              const members = clan.members || [];
+              for (const m of members) await dbSaveAccount(m, { clan: newName });
+
+              wss.clients.forEach(c => {
+                if (c.isAuthorized && members.includes(c.userData?.username)) {
+                  c.userData.clan = newName;
+                }
+              });
+              broadcastToClan(newName, JSON.stringify({ action:'clan_data', clan: await dbGetClan(newName) }), null);
+              wss.clients.forEach(c => {
+                if (c.isAuthorized && members.includes(c.userData?.username)) {
+                  c.send(JSON.stringify({ action:'toast', message:`Клан переименован администратором: «${name}» → «${newName}»` }));
+                }
+              });
+              ws.send(JSON.stringify({ action:'toast', message:`Клан переименован в «${newName}»`, type:'success' }));
+            } else {
+              if (Object.keys(patch).length) {
+                await dbSaveClan(name, patch);
+                broadcastToClan(name, JSON.stringify({ action:'clan_data', clan: await dbGetClan(name) }), null);
+              }
+              ws.send(JSON.stringify({ action:'toast', message:`Клан «${name}» обновлён`, type:'success' }));
+            }
+          }
+
+          // ── АДМИН: убрать баннер клана (модерация запрещённого контента) ──
+          else if (cmd === 'remove_clan_banner') {
+            const name = data.params?.name || data.params;
+            const clan = await dbGetClan(name);
+            if (!clan) { ws.send(JSON.stringify({ action:'toast', message:'Клан не найден' })); return; }
+            await dbSaveClan(name, { banner_url: null, banner_crop_x: 0, banner_crop_y: 0, banner_crop_w: 1, banner_crop_h: 1 });
+            broadcastToClan(name, JSON.stringify({ action:'clan_data', clan: await dbGetClan(name) }), null);
+            broadcastToClan(name, JSON.stringify({ action:'toast', message:'Баннер клана удалён администратором за нарушение правил' }), null);
+            ws.send(JSON.stringify({ action:'toast', message:`Баннер клана «${name}» удалён`, type:'success' }));
           }
 
           else if (cmd === 'clan_broadcast') {
