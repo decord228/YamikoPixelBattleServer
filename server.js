@@ -190,7 +190,14 @@ if (mongoose) {
     min_pixels:     { type: Number, default: 0 },
     is_public:      { type: Boolean, default: true },
     share_cursor:   { type: Boolean, default: false },
-    social_link:    { type: String, default: '' }
+    social_link:    { type: String, default: '' },
+
+    // ── СИСТЕМА ЗВАНИЙ / ПРАВ ──
+    // ranks: массив кастомных званий клана (включая два системных: leader, member).
+    // member_roles: { username: rankId } — звание каждого участника (кроме лидера,
+    // у него всегда системное звание 'leader', вычисляется по clan.leader).
+    ranks:          { type: Array,  default: null },
+    member_roles:   { type: Object, default: {} },
   }, { timestamps: true, autoIndex: false });
 
   const TemplateSchema = new mongoose.Schema({
@@ -287,6 +294,67 @@ async function dbGetAllAccounts() {
   return Object.entries(accounts).map(([username, v]) => ({ username, ...v }));
 }
 
+// ── СИСТЕМА ЗВАНИЙ / ПРАВ КЛАНА ──
+// Права, которые можно выдать званию. Ключи должны совпадать с CLAN_PERMISSIONS на клиенте.
+const CLAN_PERMISSION_KEYS = ['invite', 'kick', 'manage_ranks', 'manage_settings', 'manage_stencil', 'edit_motd'];
+
+function emptyClanPermissions() {
+  const p = {}; for (const k of CLAN_PERMISSION_KEYS) p[k] = false; return p;
+}
+
+function defaultClanRanks() {
+  return [
+    {
+      id: 'leader', name: 'Лидер', icon: '👑', color: '#fbbf24', priority: 100,
+      isLeader: true, isDefault: true,
+      permissions: { invite: true, kick: true, manage_ranks: true, manage_settings: true, manage_stencil: true, edit_motd: true },
+    },
+    {
+      id: 'member', name: 'Участник', icon: '⚔️', color: '#818cf8', priority: 0,
+      isDefault: true,
+      permissions: emptyClanPermissions(),
+    },
+  ];
+}
+
+// Гарантирует, что у клана есть корректный массив ranks и объект member_roles.
+// Вызывается на каждое чтение клана из БД, чтобы старые кланы (созданные до
+// введения системы званий) автоматически получили дефолтные звания.
+function ensureClanRanks(clan) {
+  if (!clan) return clan;
+  if (!Array.isArray(clan.ranks) || !clan.ranks.some(r => r.id === 'leader') || !clan.ranks.some(r => r.id === 'member')) {
+    clan.ranks = defaultClanRanks();
+  }
+  if (!clan.member_roles || typeof clan.member_roles !== 'object') clan.member_roles = {};
+  return clan;
+}
+
+function clanFindRank(clan, rankId) {
+  ensureClanRanks(clan);
+  return clan.ranks.find(r => r.id === rankId) || clan.ranks.find(r => r.id === 'member');
+}
+
+// Звание конкретного участника (лидер всегда 'leader', вычисляется по clan.leader).
+function clanRankOf(clan, username) {
+  ensureClanRanks(clan);
+  if (clan.leader === username) return clan.ranks.find(r => r.id === 'leader') || defaultClanRanks()[0];
+  const rid = clan.member_roles[username] || 'member';
+  return clan.ranks.find(r => r.id === rid) || clan.ranks.find(r => r.id === 'member');
+}
+
+// Проверка конкретного права участника. Лидер обладает всеми правами всегда.
+function clanHasPerm(clan, username, perm) {
+  if (!clan) return false;
+  if (clan.leader === username) return true;
+  const rank = clanRankOf(clan, username);
+  return !!(rank && rank.permissions && rank.permissions[perm]);
+}
+
+function clanPriorityOf(clan, username) {
+  const rank = clanRankOf(clan, username);
+  return rank ? (rank.priority || 0) : 0;
+}
+
 async function dbGetClan(name) {
   if (ClanModel) {
     try {
@@ -294,7 +362,7 @@ async function dbGetClan(name) {
       if (doc) clans[name] = { ...clans[name], ...doc };
     } catch(e) { console.error(`❌ dbGetClan(${name}):`, e.message); }
   }
-  return clans[name] || null;
+  return ensureClanRanks(clans[name] || null);
 }
 
 async function dbSaveClan(name, data) {
@@ -1230,7 +1298,8 @@ initDatabases().then(async () => {
              name, tag: tag||name.slice(0,4).toUpperCase(), description: description||'', 
              message_of_day:'', leader: ws.userData.username, members:[ws.userData.username], 
              join_requests:[], pixels:0, share_cursor:false, active_stencil:null, shared_stencil:null,
-             icon: '🏴', tag_color: '#818cf8', join_type: 'open', min_pixels: 0, is_public: true, social_link: ''
+             icon: '🏴', tag_color: '#818cf8', join_type: 'open', min_pixels: 0, is_public: true, social_link: '',
+             ranks: defaultClanRanks(), member_roles: {}
           });
           ws.send(JSON.stringify({ action:'clan_update', clan: await dbGetClan(name), coins: ws.userData.coins, message:`Клан "${name}" создан!` }));
         }
@@ -1266,7 +1335,7 @@ initDatabases().then(async () => {
         else if (action === 'clan_update_settings') {
           if (!ws.isAuthorized || !ws.userData.clan) return;
           const clan = await dbGetClan(ws.userData.clan);
-          if (!clan || clan.leader !== ws.userData.username) { ws.send(JSON.stringify({ action:'toast', message:'Нет прав' })); return; }
+          if (!clan || !clanHasPerm(clan, ws.userData.username, 'manage_settings')) { ws.send(JSON.stringify({ action:'toast', message:'Нет прав' })); return; }
           
           const settings = data.settings || {};
           const update = {
@@ -1287,10 +1356,19 @@ initDatabases().then(async () => {
           ws.send(JSON.stringify({ action:'toast', message:'Настройки клана сохранены', type:'success' }));
         }
 
+        else if (action === 'clan_set_motd') {
+          if (!ws.isAuthorized || !ws.userData.clan) return;
+          const clan = await dbGetClan(ws.userData.clan);
+          if (!clan || !clanHasPerm(clan, ws.userData.username, 'edit_motd')) { ws.send(JSON.stringify({ action:'toast', message:'Нет прав на изменение сообщения дня' })); return; }
+          const motd = (data.motd || '').trim().slice(0, 200);
+          await dbSaveClan(ws.userData.clan, { message_of_day: motd });
+          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_data', clan: await dbGetClan(ws.userData.clan) }), ws);
+        }
+
         else if (action === 'clan_get_requests') {
           if (!ws.isAuthorized || !ws.userData.clan) return;
           const clan = await dbGetClan(ws.userData.clan);
-          if (clan && clan.leader === ws.userData.username) {
+          if (clan && clanHasPerm(clan, ws.userData.username, 'invite')) {
             ws.send(JSON.stringify({ action: 'clan_requests', requests: clan.join_requests || [] }));
           }
         }
@@ -1299,7 +1377,7 @@ initDatabases().then(async () => {
           if (!ws.isAuthorized || !ws.userData.clan) return;
           const target = data.username;
           const clan = await dbGetClan(ws.userData.clan);
-          if (!clan || clan.leader !== ws.userData.username) return;
+          if (!clan || !clanHasPerm(clan, ws.userData.username, 'invite')) return;
           const requests = (clan.join_requests||[]).filter(r => r !== target);
           const newMembers = [...(clan.members||[]), target];
           await dbSaveClan(ws.userData.clan, { members: newMembers, join_requests: requests });
@@ -1313,13 +1391,14 @@ initDatabases().then(async () => {
           });
           ws.send(JSON.stringify({ action:'toast', message:`${target} принят в клан` }));
           ws.send(JSON.stringify({ action:'clan_requests', requests }));
+          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_data', clan: await dbGetClan(ws.userData.clan) }), ws);
         }
 
         else if (action === 'clan_deny_request') {
           if (!ws.isAuthorized || !ws.userData.clan) return;
           const target = data.username;
           const clan = await dbGetClan(ws.userData.clan);
-          if (!clan || clan.leader !== ws.userData.username) return;
+          if (!clan || !clanHasPerm(clan, ws.userData.username, 'invite')) return;
           const requests = (clan.join_requests||[]).filter(r => r !== target);
           await dbSaveClan(ws.userData.clan, { join_requests: requests });
           ws.send(JSON.stringify({ action:'toast', message:`Заявка от ${target} отклонена` }));
@@ -1330,9 +1409,15 @@ initDatabases().then(async () => {
           if (!ws.isAuthorized || !ws.userData.clan) return;
           const targetUser = data.username || data.target;
           const clan = await dbGetClan(ws.userData.clan);
-          if (!clan || clan.leader !== ws.userData.username || targetUser === ws.userData.username) return;
+          if (!clan || targetUser === ws.userData.username || targetUser === clan.leader) return;
+          if (!clanHasPerm(clan, ws.userData.username, 'kick')) { ws.send(JSON.stringify({ action:'toast', message:'Нет прав на исключение' })); return; }
+          // Нельзя исключить участника с равным или более высоким званием
+          if (clanPriorityOf(clan, targetUser) >= clanPriorityOf(clan, ws.userData.username)) {
+            ws.send(JSON.stringify({ action:'toast', message:'Нельзя исключить участника с таким же или более высоким званием' })); return;
+          }
           const newMembers = (clan.members||[]).filter(m => m !== targetUser);
-          await dbSaveClan(ws.userData.clan, { members: newMembers });
+          const newRoles = { ...(clan.member_roles||{}) }; delete newRoles[targetUser];
+          await dbSaveClan(ws.userData.clan, { members: newMembers, member_roles: newRoles });
           await dbSaveAccount(targetUser, { clan: '' });
           await clearClanStencilIfOwner(ws.userData.clan, targetUser);
           wss.clients.forEach(c => {
@@ -1342,6 +1427,108 @@ initDatabases().then(async () => {
             }
           });
           ws.send(JSON.stringify({ action:'toast', message:`${targetUser} исключён из клана` }));
+          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_data', clan: await dbGetClan(ws.userData.clan) }), ws);
+        }
+
+        // ── ЗВАНИЯ КЛАНА ──
+        else if (action === 'clan_rank_create') {
+          if (!ws.isAuthorized || !ws.userData.clan) return;
+          const clan = await dbGetClan(ws.userData.clan);
+          if (!clan || !clanHasPerm(clan, ws.userData.username, 'manage_ranks')) { ws.send(JSON.stringify({ action:'toast', message:'Нет прав на управление званиями' })); return; }
+          const myPriority = clanPriorityOf(clan, ws.userData.username);
+          const name = (data.name || '').trim().slice(0, 20);
+          if (!name) { ws.send(JSON.stringify({ action:'toast', message:'Введите название звания' })); return; }
+          if (clan.ranks.length >= 12) { ws.send(JSON.stringify({ action:'toast', message:'Максимум 12 званий в клане' })); return; }
+          let priority = Math.max(1, Math.min(99, parseInt(data.priority) || 1));
+          if (priority >= myPriority) priority = Math.max(1, myPriority - 1);
+          const perms = emptyClanPermissions();
+          for (const k of CLAN_PERMISSION_KEYS) if (data.permissions && data.permissions[k] && priority < myPriority) perms[k] = true;
+          const newRank = {
+            id: 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+            name, icon: (data.icon || '⭐').slice(0, 8), color: /^#[0-9a-fA-F]{6}$/.test(data.color) ? data.color : '#818cf8',
+            priority, permissions: perms,
+          };
+          const newRanks = [...clan.ranks, newRank];
+          await dbSaveClan(ws.userData.clan, { ranks: newRanks });
+          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_data', clan: await dbGetClan(ws.userData.clan) }), null);
+          ws.send(JSON.stringify({ action:'toast', message:`Звание "${name}" создано`, type:'success' }));
+        }
+
+        else if (action === 'clan_rank_update') {
+          if (!ws.isAuthorized || !ws.userData.clan) return;
+          const clan = await dbGetClan(ws.userData.clan);
+          if (!clan || !clanHasPerm(clan, ws.userData.username, 'manage_ranks')) { ws.send(JSON.stringify({ action:'toast', message:'Нет прав на управление званиями' })); return; }
+          const myPriority = clanPriorityOf(clan, ws.userData.username);
+          const rank = clan.ranks.find(r => r.id === data.id);
+          if (!rank) return;
+          if (rank.id !== 'leader' && rank.priority >= myPriority) { ws.send(JSON.stringify({ action:'toast', message:'Нельзя редактировать звание не ниже своего' })); return; }
+          if (data.name) rank.name = String(data.name).trim().slice(0, 20) || rank.name;
+          if (data.icon) rank.icon = String(data.icon).slice(0, 8);
+          if (/^#[0-9a-fA-F]{6}$/.test(data.color)) rank.color = data.color;
+          if (!rank.isLeader) {
+            if (data.priority !== undefined && rank.id !== 'member') {
+              let p = Math.max(1, Math.min(99, parseInt(data.priority) || rank.priority));
+              if (p >= myPriority) p = Math.max(1, myPriority - 1);
+              rank.priority = p;
+            }
+            if (data.permissions) {
+              const perms = emptyClanPermissions();
+              for (const k of CLAN_PERMISSION_KEYS) if (data.permissions[k]) perms[k] = true;
+              rank.permissions = perms;
+            }
+          }
+          await dbSaveClan(ws.userData.clan, { ranks: clan.ranks });
+          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_data', clan: await dbGetClan(ws.userData.clan) }), null);
+          ws.send(JSON.stringify({ action:'toast', message:'Звание обновлено', type:'success' }));
+        }
+
+        else if (action === 'clan_rank_delete') {
+          if (!ws.isAuthorized || !ws.userData.clan) return;
+          const clan = await dbGetClan(ws.userData.clan);
+          if (!clan || !clanHasPerm(clan, ws.userData.username, 'manage_ranks')) { ws.send(JSON.stringify({ action:'toast', message:'Нет прав на управление званиями' })); return; }
+          const rank = clan.ranks.find(r => r.id === data.id);
+          if (!rank || rank.isDefault) { ws.send(JSON.stringify({ action:'toast', message:'Это звание нельзя удалить' })); return; }
+          if (rank.priority >= clanPriorityOf(clan, ws.userData.username)) { ws.send(JSON.stringify({ action:'toast', message:'Нельзя удалить звание не ниже своего' })); return; }
+          const newRanks = clan.ranks.filter(r => r.id !== data.id);
+          const newRoles = { ...clan.member_roles };
+          for (const u in newRoles) if (newRoles[u] === data.id) delete newRoles[u];
+          await dbSaveClan(ws.userData.clan, { ranks: newRanks, member_roles: newRoles });
+          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_data', clan: await dbGetClan(ws.userData.clan) }), null);
+          ws.send(JSON.stringify({ action:'toast', message:`Звание "${rank.name}" удалено`, type:'success' }));
+        }
+
+        else if (action === 'clan_rank_assign') {
+          if (!ws.isAuthorized || !ws.userData.clan) return;
+          const target = data.username;
+          const clan = await dbGetClan(ws.userData.clan);
+          if (!clan || !target || target === clan.leader) return;
+          if (!clanHasPerm(clan, ws.userData.username, 'manage_ranks')) { ws.send(JSON.stringify({ action:'toast', message:'Нет прав на выдачу званий' })); return; }
+          if (!(clan.members || []).includes(target)) return;
+          const myPriority = clanPriorityOf(clan, ws.userData.username);
+          const targetRank = clanFindRank(clan, data.rankId);
+          if (!targetRank || targetRank.id === 'leader') { ws.send(JSON.stringify({ action:'toast', message:'Недопустимое звание' })); return; }
+          if (targetRank.priority >= myPriority) { ws.send(JSON.stringify({ action:'toast', message:'Нельзя выдать звание не ниже своего' })); return; }
+          if (clanPriorityOf(clan, target) >= myPriority) { ws.send(JSON.stringify({ action:'toast', message:'Нельзя менять звание участника не ниже себя' })); return; }
+          const newRoles = { ...clan.member_roles, [target]: targetRank.id };
+          if (targetRank.id === 'member') delete newRoles[target];
+          await dbSaveClan(ws.userData.clan, { member_roles: newRoles });
+          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_data', clan: await dbGetClan(ws.userData.clan) }), null);
+          ws.send(JSON.stringify({ action:'toast', message:`${target} теперь ${targetRank.icon} ${targetRank.name}`, type:'success' }));
+        }
+
+        else if (action === 'clan_transfer_leadership') {
+          if (!ws.isAuthorized || !ws.userData.clan) return;
+          const target = data.username;
+          const clan = await dbGetClan(ws.userData.clan);
+          if (!clan || clan.leader !== ws.userData.username || !target || target === ws.userData.username) return;
+          if (!(clan.members || []).includes(target)) { ws.send(JSON.stringify({ action:'toast', message:'Участник не найден в клане' })); return; }
+          const newRoles = { ...clan.member_roles };
+          delete newRoles[target];
+          newRoles[ws.userData.username] = 'member';
+          await dbSaveClan(ws.userData.clan, { leader: target, member_roles: newRoles });
+          wss.clients.forEach(c => { if (c.isAuthorized && c.userData?.clan === ws.userData.clan) c.send(JSON.stringify({ action:'toast', message:`👑 ${target} теперь лидер клана!`, type:'success' })); });
+          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_data', clan: await dbGetClan(ws.userData.clan) }), null);
+          ws.send(JSON.stringify({ action:'clan_data', clan: await dbGetClan(ws.userData.clan) }));
         }
 
         else if (action === 'clan_leave') {
@@ -1350,11 +1537,19 @@ initDatabases().then(async () => {
           const clan     = await dbGetClan(clanName);
           if (!clan) return;
           const newMembers = (clan.members||[]).filter(m => m !== ws.userData.username);
+          const newRoles = { ...(clan.member_roles||{}) }; delete newRoles[ws.userData.username];
           if (newMembers.length === 0) {
             await dbDeleteClan(clanName);
           } else {
-            const newLeader = clan.leader === ws.userData.username ? newMembers[0] : clan.leader;
-            await dbSaveClan(clanName, { members: newMembers, leader: newLeader });
+            let newLeader = clan.leader;
+            if (clan.leader === ws.userData.username) {
+              // Лидерство переходит участнику с наивысшим приоритетом звания (со-руководителю),
+              // а не случайному первому в списке.
+              newLeader = newMembers.slice().sort((a, b) => clanPriorityOf(clan, b) - clanPriorityOf(clan, a))[0];
+              delete newRoles[newLeader];
+            }
+            await dbSaveClan(clanName, { members: newMembers, leader: newLeader, member_roles: newRoles });
+            broadcastToClan(clanName, JSON.stringify({ action:'clan_data', clan: await dbGetClan(clanName) }), ws);
           }
           await dbSaveAccount(ws.userData.username, { clan: '' });
           await clearClanStencilIfOwner(clanName, ws.userData.username);
@@ -1614,6 +1809,39 @@ initDatabases().then(async () => {
               const msg = JSON.stringify({ action:'resize', w:newW, h:newH });
               wss.clients.forEach(c => { if (c.readyState===1&&c.isAuthorized) { c.send(msg); c.send(canvasData); } });
               ws.send(JSON.stringify({ action:'toast', message:`Холст изменён до ${newW}×${newH}` }));
+            }
+          }
+
+          else if (cmd === 'get_clans') {
+            const allClans = await dbGetAllClans();
+            ws.send(JSON.stringify({ action:'admin_clans_list', clans: allClans.map(c => ({
+              name: c.name, tag: c.tag||'', tag_color: c.tag_color||'#818cf8', icon: c.icon||'🏴',
+              leader: c.leader||'', members: (c.members||[]).length, pixels: c.pixels||0, is_public: c.is_public!==false,
+            })) }));
+          }
+
+          else if (cmd === 'delete_clan') {
+            const name = data.params?.name || data.params;
+            const clan = await dbGetClan(name);
+            if (clan) {
+              const members = clan.members || [];
+              for (const m of members) await dbSaveAccount(m, { clan: '' });
+              await dbDeleteClan(name);
+              wss.clients.forEach(c => {
+                if (c.isAuthorized && members.includes(c.userData?.username)) {
+                  c.userData.clan = '';
+                  c.send(JSON.stringify({ action:'clan_update', clan:null, message:`Клан "${name}" был удалён администратором` }));
+                }
+              });
+              ws.send(JSON.stringify({ action:'toast', message:`Клан "${name}" удалён` }));
+            }
+          }
+
+          else if (cmd === 'clan_broadcast') {
+            const { name, message } = data.params || {};
+            if (name && message) {
+              broadcastToClan(name, JSON.stringify({ action:'toast', message:`📢 [Админ]: ${message}` }), null);
+              ws.send(JSON.stringify({ action:'toast', message:`Сообщение отправлено клану "${name}"` }));
             }
           }
 
