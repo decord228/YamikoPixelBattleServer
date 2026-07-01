@@ -217,6 +217,8 @@ if (mongoose) {
     text:       { type: String, default: '' },   // полный текст для детального просмотра
     date:       { type: String, default: '' },   // отображаемая дата (строка)
     bgImage:    { type: String, default: null },  // фон слайда (Cloudinary URL), из Figma
+    bgPosX:     { type: Number, default: 50 },    // видимая зона картинки по X, % (background-position-x)
+    bgPosY:     { type: Number, default: 50 },    // видимая зона картинки по Y, % (background-position-y)
     eventTimer: { type: Number, default: null },  // таймстамп (мс) целевого события, или null
     showArt:    { type: Boolean, default: true },  // показывать news-slide-art
     showTag:    { type: Boolean, default: true },  // показывать news-slide-tag
@@ -607,14 +609,26 @@ initDatabases().then(() => {
       if (!imageBase64 || !name) return res.status(400).json({ error: 'Missing data' });
       let cloudUrl = null, cloudId = null;
       if (cloudinary && process.env.CLOUDINARY_CLOUD_NAME) {
-        const result = await cloudinary.uploader.upload(imageBase64, {
-          folder: 'pixel_battle_templates',
-          public_id: `tmpl_${Date.now()}`,
-        });
-        cloudUrl = result.secure_url; cloudId = result.public_id;
+        try {
+          const result = await cloudinary.uploader.upload(imageBase64, {
+            folder: 'pixel_battle_templates',
+            public_id: `tmpl_${Date.now()}`,
+          });
+          cloudUrl = result.secure_url; cloudId = result.public_id;
+        } catch (cloudErr) {
+          console.error('❌ Cloudinary upload failed, falling back to inline data URL:', cloudErr.message);
+        }
       }
-      await dbSaveTemplate({ name, cloudinary_url: cloudUrl, cloudinary_id: cloudId, uploader: username || 'anon' });
-      res.json({ success: true, url: cloudUrl, name });
+      // ВАЖНО: если Cloudinary не настроен (нет CLOUDINARY_CLOUD_NAME в env) или
+      // сам аплоад упал — раньше cloudUrl оставался null, но сервер всё равно
+      // отвечал {success:true, url:null}. Клиент в этом случае молча не
+      // выставлял картинку — не было ни явной ошибки, ни рабочего фона:
+      // "картинка не подтянулась". Чиним это: если облако недоступно, отдаём
+      // саму base64 data URL как universal fallback — она отлично работает
+      // как src/background-image напрямую в браузере, просто без сжатия/CDN.
+      if (!cloudUrl) cloudUrl = imageBase64;
+      await dbSaveTemplate({ name, cloudinary_url: cloudId ? cloudUrl : null, cloudinary_id: cloudId, uploader: username || 'anon' });
+      res.json({ success: true, url: cloudUrl, name, fallback: !cloudId });
     } catch(e) { res.status(500).json({ error: e.message }); }
   }
   app.post('/api/upload-template', handleUploadTemplate);
@@ -1775,6 +1789,8 @@ initDatabases().then(() => {
               text:       String(p.text || '').slice(0, 8000),
               date:       String(p.date || new Date().toLocaleDateString('ru-RU')),
               bgImage:    p.bgImage || null,
+              bgPosX:     Number.isFinite(Number(p.bgPosX)) ? Math.max(0, Math.min(100, Number(p.bgPosX))) : 50,
+              bgPosY:     Number.isFinite(Number(p.bgPosY)) ? Math.max(0, Math.min(100, Number(p.bgPosY))) : 50,
               eventTimer: p.eventTimer ? Number(p.eventTimer) : null,
               showArt:    p.showArt !== false,
               showTag:    p.showTag !== false,
@@ -1796,6 +1812,8 @@ initDatabases().then(() => {
               text:       String(p.text || '').slice(0, 8000),
               date:       String(p.date || ''),
               bgImage:    p.bgImage || null,
+              bgPosX:     Number.isFinite(Number(p.bgPosX)) ? Math.max(0, Math.min(100, Number(p.bgPosX))) : 50,
+              bgPosY:     Number.isFinite(Number(p.bgPosY)) ? Math.max(0, Math.min(100, Number(p.bgPosY))) : 50,
               eventTimer: p.eventTimer ? Number(p.eventTimer) : null,
               showArt:    p.showArt !== false,
               showTag:    p.showTag !== false,
