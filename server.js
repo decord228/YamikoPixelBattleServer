@@ -1231,7 +1231,8 @@ initDatabases().then(async () => {
           const allClans = await dbGetAllClans();
           const clanTop  = allClans
             .filter(c => c.is_public !== false)
-            .map(c => ({ name: c.name, tag: c.tag||'', icon: c.icon||'', tag_color: c.tag_color||'#818cf8', pixels: c.pixels||0, members: (c.members||[]).length }))
+            .map(c => ({ name: c.name, tag: c.tag||'', icon: c.icon||'', tag_color: c.tag_color||'#818cf8', pixels: c.pixels||0, members: (c.members||[]).length,
+                         banner_url: c.banner_url||null, banner_crop_x: c.banner_crop_x??0, banner_crop_y: c.banner_crop_y??0, banner_crop_w: c.banner_crop_w??1, banner_crop_h: c.banner_crop_h??1 }))
             .sort((a, b) => b.pixels - a.pixels).slice(0, 20);
           ws.send(JSON.stringify({ action: 'leaderboard_data', players, clans: clanTop }));
         }
