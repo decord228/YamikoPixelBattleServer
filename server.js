@@ -86,6 +86,8 @@ let serverSettings = {
 let accounts  = {};
 let clans     = {};
 let templates = [];
+let newsItems = []; // ← Новости (слайдшоу + лента), см. NewsSchema ниже
+const NEWS_FILE = path.join(__dirname, 'news.json');
 
 // Глобальный чат (хранится только в памяти, сбрасывается при рестарте)
 const globalChatHistory = [];
@@ -142,7 +144,7 @@ const dbTimeout = (promise, ms = 4000) => Promise.race([
 ]);
 
 // ── MONGOOSE SCHEMAS ───────────────────────────────────────
-let AccountModel = null, ClanModel = null, TemplateModel = null, SettingsModel = null;
+let AccountModel = null, ClanModel = null, TemplateModel = null, SettingsModel = null, NewsModel = null;
 
 if (mongoose) {
   mongoose.set('bufferCommands', false);
@@ -205,10 +207,28 @@ if (mongoose) {
     value: mongoose.Schema.Types.Mixed,
   }, { timestamps: true, autoIndex: false });
 
+  // Новости: слайдшоу + лента в панели "Новости".
+  const NewsSchema = new mongoose.Schema({
+    id:         { type: String, unique: true, index: true }, // собственный короткий id (не _id)
+    title:      { type: String, default: '' },   // заголовок
+    tag:        { type: String, default: '' },   // бейджик (news-slide-tag)
+    art:        { type: String, default: '📰' }, // эмодзи-иконка слайда
+    desc:       { type: String, default: '' },   // короткое описание для слайда/списка
+    text:       { type: String, default: '' },   // полный текст для детального просмотра
+    date:       { type: String, default: '' },   // отображаемая дата (строка)
+    bgImage:    { type: String, default: null },  // фон слайда (Cloudinary URL), из Figma
+    eventTimer: { type: Number, default: null },  // таймстамп (мс) целевого события, или null
+    showArt:    { type: Boolean, default: true },  // показывать news-slide-art
+    showTag:    { type: Boolean, default: true },  // показывать news-slide-tag
+    showText:   { type: Boolean, default: true },  // показывать title+desc на слайде
+    order:      { type: Number, default: 0 },
+  }, { timestamps: true, autoIndex: false });
+
   AccountModel  = mongoose.model('Account',  AccountSchema);
   ClanModel     = mongoose.model('Clan',      ClanSchema);
   TemplateModel = mongoose.model('Template',  TemplateSchema);
   SettingsModel = mongoose.model('Setting',   SettingsSchema);
+  NewsModel     = mongoose.model('News',      NewsSchema);
 }
 
 // ── REDIS ──────────────────────────────────────────────────
@@ -311,6 +331,60 @@ async function dbSaveTemplate(data) {
   templates.push(data);
 }
 
+// ── НОВОСТИ ────────────────────────────────────────────────
+function saveLocalNews() {
+  try { fs.writeFileSync(NEWS_FILE, JSON.stringify(newsItems, null, 2)); } catch(e) {}
+}
+
+async function dbGetNews() {
+  let list;
+  if (NewsModel) {
+    try { list = await dbTimeout(NewsModel.find({}).lean().exec()); }
+    catch(e) { console.error('❌ dbGetNews:', e.message); list = newsItems; }
+  } else {
+    list = newsItems;
+  }
+  return [...list].sort((a, b) => (a.order || 0) - (b.order || 0));
+}
+
+async function dbSaveNews(id, data) {
+  const idx = newsItems.findIndex(n => n.id === id);
+  if (idx >= 0) newsItems[idx] = { ...newsItems[idx], ...data, id };
+  else newsItems.push({ id, order: newsItems.length, ...data });
+
+  if (NewsModel) {
+    try { await dbTimeout(NewsModel.findOneAndUpdate({ id }, { ...data, id }, { upsert: true, new: true }).exec()); }
+    catch(e) { console.error('❌ dbSaveNews:', e.message); }
+  } else {
+    saveLocalNews();
+  }
+}
+
+async function dbDeleteNews(id) {
+  newsItems = newsItems.filter(n => n.id !== id);
+  if (NewsModel) {
+    try { await dbTimeout(NewsModel.deleteOne({ id }).exec()); } catch(e) { console.error('❌ dbDeleteNews:', e.message); }
+  } else {
+    saveLocalNews();
+  }
+}
+
+async function dbReorderNews(orderedIds) {
+  orderedIds.forEach((id, i) => {
+    const item = newsItems.find(n => n.id === id);
+    if (item) item.order = i;
+  });
+  if (NewsModel) {
+    try {
+      await dbTimeout(Promise.all(orderedIds.map((id, i) =>
+        NewsModel.updateOne({ id }, { order: i }).exec()
+      )));
+    } catch(e) { console.error('❌ dbReorderNews:', e.message); }
+  } else {
+    saveLocalNews();
+  }
+}
+
 async function dbGetSettings() {
   if (SettingsModel) {
     try {
@@ -364,6 +438,13 @@ async function initDatabases() {
       try { accounts = JSON.parse(fs.readFileSync(af, 'utf8')); } catch(e) {}
     }
     if (accounts['d3cord']?.email === 'otarasik10@gmail.com') accounts['d3cord'].role = 'admin';
+  }
+
+  // Новости из файла (если нет MongoDB)
+  if (!NewsModel) {
+    if (fs.existsSync(NEWS_FILE)) {
+      try { newsItems = JSON.parse(fs.readFileSync(NEWS_FILE, 'utf8')); } catch(e) {}
+    }
   }
 
   // Метаданные холста
@@ -655,6 +736,11 @@ initDatabases().then(() => {
     wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized) c.send(msg); });
   }
 
+  // Новости видны и незалогиненным (как и сам холст) — рассылаем всем открытым сокетам.
+  function broadcastPublic(msg) {
+    wss.clients.forEach(c => { if (c.readyState === 1) c.send(msg); });
+  }
+
   function broadcastToClan(clanName, msg, excludeWs) {
     wss.clients.forEach(c => {
       if (c.readyState === 1 && c.isAuthorized && c.userData?.clan === clanName && c !== excludeWs)
@@ -806,6 +892,7 @@ initDatabases().then(() => {
 
     ws.send(canvasData);
     ws.send(JSON.stringify({ action: 'server_settings', settings: serverSettings }));
+    dbGetNews().then(items => ws.send(JSON.stringify({ action: 'news_data', items }))).catch(()=>{});
     if (globalChatHistory.length > 0) {
       ws.send(JSON.stringify({ action: 'chat_history', messages: globalChatHistory }));
     }
@@ -1675,6 +1762,65 @@ initDatabases().then(() => {
               canvas_h:     CANVAS_HEIGHT,
               cooldown_ms:  serverSettings.cooldownMs,
             }));
+          }
+
+          else if (cmd === 'news_create') {
+            const p = data.params || {};
+            const id = 'n_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+            await dbSaveNews(id, {
+              title:      String(p.title || '').slice(0, 200),
+              tag:        String(p.tag || '').slice(0, 60),
+              art:        String(p.art || '📰').slice(0, 8),
+              desc:       String(p.desc || '').slice(0, 400),
+              text:       String(p.text || '').slice(0, 8000),
+              date:       String(p.date || new Date().toLocaleDateString('ru-RU')),
+              bgImage:    p.bgImage || null,
+              eventTimer: p.eventTimer ? Number(p.eventTimer) : null,
+              showArt:    p.showArt !== false,
+              showTag:    p.showTag !== false,
+              showText:   p.showText !== false,
+            });
+            const items = await dbGetNews();
+            broadcastPublic(JSON.stringify({ action: 'news_data', items }));
+            ws.send(JSON.stringify({ action: 'toast', message: 'Новость создана', }));
+          }
+
+          else if (cmd === 'news_update') {
+            const p = data.params || {};
+            if (!p.id) { ws.send(JSON.stringify({ action:'toast', message:'Нет ID новости' })); return; }
+            await dbSaveNews(p.id, {
+              title:      String(p.title || '').slice(0, 200),
+              tag:        String(p.tag || '').slice(0, 60),
+              art:        String(p.art || '📰').slice(0, 8),
+              desc:       String(p.desc || '').slice(0, 400),
+              text:       String(p.text || '').slice(0, 8000),
+              date:       String(p.date || ''),
+              bgImage:    p.bgImage || null,
+              eventTimer: p.eventTimer ? Number(p.eventTimer) : null,
+              showArt:    p.showArt !== false,
+              showTag:    p.showTag !== false,
+              showText:   p.showText !== false,
+            });
+            const items = await dbGetNews();
+            broadcastPublic(JSON.stringify({ action: 'news_data', items }));
+            ws.send(JSON.stringify({ action: 'toast', message: 'Новость обновлена' }));
+          }
+
+          else if (cmd === 'news_delete') {
+            const id = data.params?.id || data.target;
+            if (!id) return;
+            await dbDeleteNews(id);
+            const items = await dbGetNews();
+            broadcastPublic(JSON.stringify({ action: 'news_data', items }));
+            ws.send(JSON.stringify({ action: 'toast', message: 'Новость удалена' }));
+          }
+
+          else if (cmd === 'news_reorder') {
+            const ids = data.params?.ids;
+            if (!Array.isArray(ids) || !ids.length) return;
+            await dbReorderNews(ids);
+            const items = await dbGetNews();
+            broadcastPublic(JSON.stringify({ action: 'news_data', items }));
           }
 
           else if (cmd === 'timelapse_start') {
