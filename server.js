@@ -1342,8 +1342,27 @@ initDatabases().then(async () => {
           if (!ws.isAuthorized || !ws.userData.clan) return;
           const clan = await dbGetClan(ws.userData.clan);
           if (!clan || !clanHasPerm(clan, ws.userData.username, 'manage_settings')) { ws.send(JSON.stringify({ action:'toast', message:'Нет прав' })); return; }
-          
+
           const settings = data.settings || {};
+
+          // ── Смена баннера клана платная (200 монет за установку нового баннера) ──
+          // Списываем только когда баннер реально меняется на новый (не при снятии
+          // и не при повторном сохранении настроек с тем же баннером).
+          const newBannerUrl = settings.banner_url || null;
+          const bannerChanged = newBannerUrl && newBannerUrl !== (clan.banner_url || null);
+          const BANNER_COST = 200;
+          if (bannerChanged) {
+            const acc = await dbGetAccount(ws.userData.username);
+            if ((acc.coins || 0) < BANNER_COST) {
+              ws.send(JSON.stringify({ action:'toast', message:`Нужно ${BANNER_COST} монет, чтобы установить баннер клана!` }));
+              return;
+            }
+            const newCoinsAfterBanner = (acc.coins || 0) - BANNER_COST;
+            await dbSaveAccount(ws.userData.username, { coins: newCoinsAfterBanner });
+            ws.userData.coins = newCoinsAfterBanner;
+            ws.send(JSON.stringify({ action:'coins_update', coins: newCoinsAfterBanner, pixels: acc.pixels || 0 }));
+          }
+
           const update = {
              icon: settings.icon || '🏴',
              tag_color: settings.tag_color || '#818cf8',
@@ -1635,7 +1654,8 @@ initDatabases().then(async () => {
         else if (action === 'clan_list') {
           const allClans = await dbGetAllClans();
           ws.send(JSON.stringify({ action:'clan_list_data', clans: allClans.filter(c => c.is_public !== false).map(c => ({
-            name: c.name, tag: c.tag, tag_color: c.tag_color, icon: c.icon, join_type: c.join_type, members: (c.members||[]).length, pixels: c.pixels||0, description: c.description||''
+            name: c.name, tag: c.tag, tag_color: c.tag_color, icon: c.icon, join_type: c.join_type, min_pixels: c.min_pixels||0, members: (c.members||[]).length, pixels: c.pixels||0, description: c.description||'',
+            banner_url: c.banner_url||null, banner_crop_x: c.banner_crop_x??0, banner_crop_y: c.banner_crop_y??0, banner_crop_w: c.banner_crop_w??1, banner_crop_h: c.banner_crop_h??1
           })) }));
         }
 
