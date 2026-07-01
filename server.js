@@ -217,8 +217,10 @@ if (mongoose) {
     text:       { type: String, default: '' },   // полный текст для детального просмотра
     date:       { type: String, default: '' },   // отображаемая дата (строка)
     bgImage:    { type: String, default: null },  // фон слайда (Cloudinary URL), из Figma
-    bgPosX:     { type: Number, default: 50 },    // видимая зона картинки по X, % (background-position-x)
-    bgPosY:     { type: Number, default: 50 },    // видимая зона картинки по Y, % (background-position-y)
+    bgCropX:    { type: Number, default: 0 },     // крой картинки: X, доля 0..1
+    bgCropY:    { type: Number, default: 0 },     // крой картинки: Y, доля 0..1
+    bgCropW:    { type: Number, default: 1 },     // крой картинки: ширина, доля 0..1
+    bgCropH:    { type: Number, default: 1 },     // крой картинки: высота, доля 0..1
     eventTimer: { type: Number, default: null },  // таймстамп (мс) целевого события, или null
     showArt:    { type: Boolean, default: true },  // показывать news-slide-art
     showTag:    { type: Boolean, default: true },  // показывать news-slide-tag
@@ -1789,8 +1791,10 @@ initDatabases().then(() => {
               text:       String(p.text || '').slice(0, 8000),
               date:       String(p.date || new Date().toLocaleDateString('ru-RU')),
               bgImage:    p.bgImage || null,
-              bgPosX:     Number.isFinite(Number(p.bgPosX)) ? Math.max(0, Math.min(100, Number(p.bgPosX))) : 50,
-              bgPosY:     Number.isFinite(Number(p.bgPosY)) ? Math.max(0, Math.min(100, Number(p.bgPosY))) : 50,
+              bgCropX:    Number.isFinite(Number(p.bgCropX)) ? Math.max(0, Math.min(1, Number(p.bgCropX))) : 0,
+              bgCropY:    Number.isFinite(Number(p.bgCropY)) ? Math.max(0, Math.min(1, Number(p.bgCropY))) : 0,
+              bgCropW:    Number.isFinite(Number(p.bgCropW)) ? Math.max(0.02, Math.min(1, Number(p.bgCropW))) : 1,
+              bgCropH:    Number.isFinite(Number(p.bgCropH)) ? Math.max(0.02, Math.min(1, Number(p.bgCropH))) : 1,
               eventTimer: p.eventTimer ? Number(p.eventTimer) : null,
               showArt:    p.showArt !== false,
               showTag:    p.showTag !== false,
@@ -1812,8 +1816,10 @@ initDatabases().then(() => {
               text:       String(p.text || '').slice(0, 8000),
               date:       String(p.date || ''),
               bgImage:    p.bgImage || null,
-              bgPosX:     Number.isFinite(Number(p.bgPosX)) ? Math.max(0, Math.min(100, Number(p.bgPosX))) : 50,
-              bgPosY:     Number.isFinite(Number(p.bgPosY)) ? Math.max(0, Math.min(100, Number(p.bgPosY))) : 50,
+              bgCropX:    Number.isFinite(Number(p.bgCropX)) ? Math.max(0, Math.min(1, Number(p.bgCropX))) : 0,
+              bgCropY:    Number.isFinite(Number(p.bgCropY)) ? Math.max(0, Math.min(1, Number(p.bgCropY))) : 0,
+              bgCropW:    Number.isFinite(Number(p.bgCropW)) ? Math.max(0.02, Math.min(1, Number(p.bgCropW))) : 1,
+              bgCropH:    Number.isFinite(Number(p.bgCropH)) ? Math.max(0.02, Math.min(1, Number(p.bgCropH))) : 1,
               eventTimer: p.eventTimer ? Number(p.eventTimer) : null,
               showArt:    p.showArt !== false,
               showTag:    p.showTag !== false,
