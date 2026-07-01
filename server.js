@@ -191,6 +191,11 @@ if (mongoose) {
     is_public:      { type: Boolean, default: true },
     share_cursor:   { type: Boolean, default: false },
     social_link:    { type: String, default: '' },
+    banner_url:     { type: String, default: null },
+    banner_crop_x:  { type: Number, default: 0 },
+    banner_crop_y:  { type: Number, default: 0 },
+    banner_crop_w:  { type: Number, default: 1 },
+    banner_crop_h:  { type: Number, default: 1 },
 
     // ── СИСТЕМА ЗВАНИЙ / ПРАВ ──
     // ranks: массив кастомных званий клана (включая два системных: leader, member).
@@ -1299,6 +1304,7 @@ initDatabases().then(async () => {
              message_of_day:'', leader: ws.userData.username, members:[ws.userData.username], 
              join_requests:[], pixels:0, share_cursor:false, active_stencil:null, shared_stencil:null,
              icon: '🏴', tag_color: '#818cf8', join_type: 'open', min_pixels: 0, is_public: true, social_link: '',
+             banner_url: null, banner_crop_x: 0, banner_crop_y: 0, banner_crop_w: 1, banner_crop_h: 1,
              ranks: defaultClanRanks(), member_roles: {}
           });
           ws.send(JSON.stringify({ action:'clan_update', clan: await dbGetClan(name), coins: ws.userData.coins, message:`Клан "${name}" создан!` }));
@@ -1346,7 +1352,12 @@ initDatabases().then(async () => {
              is_public: !!settings.is_public,
              share_cursor: !!settings.share_cursor,
              social_link: settings.social_link || '',
-             message_of_day: (settings.message_of_day || '').slice(0, 200)
+             message_of_day: (settings.message_of_day || '').slice(0, 200),
+             banner_url: settings.banner_url || null,
+             banner_crop_x: Number.isFinite(Number(settings.banner_crop_x)) ? Math.max(0, Math.min(1, Number(settings.banner_crop_x))) : 0,
+             banner_crop_y: Number.isFinite(Number(settings.banner_crop_y)) ? Math.max(0, Math.min(1, Number(settings.banner_crop_y))) : 0,
+             banner_crop_w: Number.isFinite(Number(settings.banner_crop_w)) ? Math.max(0.02, Math.min(1, Number(settings.banner_crop_w))) : 1,
+             banner_crop_h: Number.isFinite(Number(settings.banner_crop_h)) ? Math.max(0.02, Math.min(1, Number(settings.banner_crop_h))) : 1,
           };
           
           await dbSaveClan(ws.userData.clan, update);
