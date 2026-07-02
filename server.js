@@ -93,6 +93,11 @@ const NEWS_FILE = path.join(__dirname, 'news.json');
 const globalChatHistory = [];
 const CHAT_HISTORY_LIMIT = 100;
 
+// Личные сообщения: pairKey ('userA__userB', отсортировано) → { messages:[{from,text,ts}] }
+let dmThreads = {};
+const DM_FILE = path.join(__dirname, 'dm.json');
+const DM_HISTORY_LIMIT = 300;
+
 // ── BATCH SAVE QUEUES ──────────────────────────────────────
 const dirtyAccounts = new Set();
 const dirtyClans    = new Set();
@@ -144,7 +149,7 @@ const dbTimeout = (promise, ms = 4000) => Promise.race([
 ]);
 
 // ── MONGOOSE SCHEMAS ───────────────────────────────────────
-let AccountModel = null, ClanModel = null, TemplateModel = null, SettingsModel = null, NewsModel = null;
+let AccountModel = null, ClanModel = null, TemplateModel = null, SettingsModel = null, NewsModel = null, DMModel = null;
 
 if (mongoose) {
   mongoose.set('bufferCommands', false);
@@ -167,6 +172,12 @@ if (mongoose) {
     upgrades:          { type: [String], default: [] },
     active_stencil:    { type: Object, default: null }, // Текущий трафарет
     saved_stencils:    { type: Array, default: [] },    // Сохраненные пресеты трафаретов
+
+    // ── СОЦИАЛЬНАЯ СЕТЬ: ДРУЗЬЯ И ЛС ──
+    friends:             { type: [String], default: [] }, // список username друзей
+    friend_requests_in:  { type: [String], default: [] }, // входящие заявки в друзья (кто добавил меня)
+    friend_requests_out: { type: [String], default: [] }, // исходящие заявки в друзья (кого добавил я)
+    dm_reads:            { type: Object,   default: {} }, // { peerUsername: timestamp последнего прочтения переписки }
   }, { timestamps: true, autoIndex: false });
 
   const ClanSchema = new mongoose.Schema({
@@ -246,11 +257,19 @@ if (mongoose) {
     order:      { type: Number, default: 0 },
   }, { timestamps: true, autoIndex: false });
 
+  // Личные сообщения (ЛС). Один документ = одна пара собеседников.
+  // pairKey — отсортированные username через '__', чтобы у пары всегда был один документ.
+  const DMSchema = new mongoose.Schema({
+    pairKey:  { type: String, unique: true, index: true },
+    messages: { type: Array, default: [] }, // [{ from, text, ts }]
+  }, { timestamps: true, autoIndex: false });
+
   AccountModel  = mongoose.model('Account',  AccountSchema);
   ClanModel     = mongoose.model('Clan',      ClanSchema);
   TemplateModel = mongoose.model('Template',  TemplateSchema);
   SettingsModel = mongoose.model('Setting',   SettingsSchema);
   NewsModel     = mongoose.model('News',      NewsSchema);
+  DMModel       = mongoose.model('DirectMessage', DMSchema);
 }
 
 // ── REDIS ──────────────────────────────────────────────────
@@ -496,6 +515,57 @@ async function dbReorderNews(orderedIds) {
   }
 }
 
+// ── ЛИЧНЫЕ СООБЩЕНИЯ (ЛС) ────────────────────────────────────
+function saveLocalDM() {
+  try { fs.writeFileSync(DM_FILE, JSON.stringify(dmThreads, null, 2)); } catch(e) {}
+}
+
+function dmPairKey(a, b) {
+  return [a, b].sort((x, y) => x.localeCompare(y)).join('__');
+}
+
+async function dbGetDMThread(a, b) {
+  const key = dmPairKey(a, b);
+  if (DMModel) {
+    try {
+      const doc = await dbTimeout(DMModel.findOne({ pairKey: key }).lean().exec());
+      if (doc) dmThreads[key] = { messages: doc.messages || [] };
+    } catch(e) { console.error(`❌ dbGetDMThread(${key}):`, e.message); }
+  }
+  return dmThreads[key] || { messages: [] };
+}
+
+async function dbAppendDMMessage(a, b, msg) {
+  const key = dmPairKey(a, b);
+  const thread = dmThreads[key] || { messages: [] };
+  thread.messages.push(msg);
+  if (thread.messages.length > DM_HISTORY_LIMIT) thread.messages.shift();
+  dmThreads[key] = thread;
+  if (DMModel) {
+    try {
+      await dbTimeout(DMModel.findOneAndUpdate({ pairKey: key }, { pairKey: key, messages: thread.messages }, { upsert: true }).exec());
+    } catch(e) { console.error(`❌ dbAppendDMMessage(${key}):`, e.message); saveLocalDM(); }
+  } else {
+    saveLocalDM();
+  }
+  return thread;
+}
+
+// Список username-ов, с которыми у пользователя есть история переписки (для ЛС-списка бесед),
+// даже если это не друзья — переписка сохраняется независимо от списка друзей.
+async function dbGetDMPartners(username) {
+  if (DMModel) {
+    try {
+      const docs = await dbTimeout(DMModel.find({ pairKey: new RegExp(`(^|__)${username.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}(__|$)`) }).lean().exec());
+      return docs.map(d => d.pairKey.split('__').find(u => u !== username)).filter(Boolean);
+    } catch(e) { console.error('❌ dbGetDMPartners:', e.message); return []; }
+  }
+  return Object.keys(dmThreads)
+    .filter(key => key.split('__').includes(username))
+    .map(key => key.split('__').find(u => u !== username))
+    .filter(Boolean);
+}
+
 async function dbGetSettings() {
   if (SettingsModel) {
     try {
@@ -527,7 +597,7 @@ async function initDatabases() {
       console.log('✅ MongoDB Atlas подключён');
     } catch(e) {
       console.error('❌ MongoDB:', e.message);
-      mongoose = null; AccountModel = null; ClanModel = null; TemplateModel = null; SettingsModel = null;
+      mongoose = null; AccountModel = null; ClanModel = null; TemplateModel = null; SettingsModel = null; DMModel = null;
     }
   }
 
@@ -555,6 +625,13 @@ async function initDatabases() {
   if (!NewsModel) {
     if (fs.existsSync(NEWS_FILE)) {
       try { newsItems = JSON.parse(fs.readFileSync(NEWS_FILE, 'utf8')); } catch(e) {}
+    }
+  }
+
+  // Личные сообщения из файла (если нет MongoDB)
+  if (!DMModel) {
+    if (fs.existsSync(DM_FILE)) {
+      try { dmThreads = JSON.parse(fs.readFileSync(DM_FILE, 'utf8')); } catch(e) {}
     }
   }
 
@@ -884,6 +961,83 @@ initDatabases().then(async () => {
     });
   }
 
+  // ── СОЦИАЛЬНАЯ СЕТЬ: ДРУЗЬЯ / ЛС / ОНЛАЙН ──────────────────
+  // Находит открытый сокет по username (последний залогинившийся, если открыто
+  // несколько вкладок — сообщения всё равно уйдут во все его сокеты через forEach).
+  function findClientsByUsername(username) {
+    const list = [];
+    wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized && c.userData?.username === username) list.push(c); });
+    return list;
+  }
+
+  function sendToUser(username, obj) {
+    const msg = JSON.stringify(obj);
+    findClientsByUsername(username).forEach(c => c.send(msg));
+  }
+
+  function isUserOnline(username) {
+    return findClientsByUsername(username).length > 0;
+  }
+
+  // Список всех сейчас залогиненных пользователей (дедуплицирован по username —
+  // на случай нескольких открытых вкладок одного игрока).
+  function getOnlineUsersSnapshot(excludeUsername) {
+    const seen = new Map();
+    wss.clients.forEach(c => {
+      if (c.readyState === 1 && c.isAuthorized && c.userData && c.userData.username !== excludeUsername) {
+        seen.set(c.userData.username, {
+          username: c.userData.username,
+          emoji:    c.userData.emoji || '👾',
+          role:     c.userData.role  || 'user',
+          rank:     c.userData.rank  || 'Новичок',
+          clan:     c.userData.clan  || '',
+        });
+      }
+    });
+    return Array.from(seen.values());
+  }
+
+  // Короткая карточка пользователя по account-объекту/userData — используется
+  // и в friends_update, и в user_search_results, чтобы формат был одинаковым.
+  function userCard(acc, extra) {
+    if (!acc) return null;
+    return {
+      username: acc.username,
+      emoji:    acc.emoji || '👾',
+      role:     acc.role  || 'user',
+      rank:     acc.rank  || 'Новичок',
+      clan:     acc.clan  || '',
+      pixels:   acc.pixels || 0,
+      online:   isUserOnline(acc.username),
+      ...extra,
+    };
+  }
+
+  // Полная сборка и отправка friends_update конкретному пользователю
+  // (используется после любой операции с друзьями/заявками).
+  async function sendFriendsUpdate(username) {
+    const acc = await dbGetAccount(username);
+    if (!acc) return;
+    const friends  = await Promise.all((acc.friends || []).map(u => dbGetAccount(u)));
+    const incoming = await Promise.all((acc.friend_requests_in  || []).map(u => dbGetAccount(u)));
+    const outgoing = await Promise.all((acc.friend_requests_out || []).map(u => dbGetAccount(u)));
+    sendToUser(username, {
+      action:   'friends_update',
+      friends:  friends.filter(Boolean).map(a => userCard(a)),
+      incoming: incoming.filter(Boolean).map(a => userCard(a)),
+      outgoing: outgoing.filter(Boolean).map(a => userCard(a)),
+    });
+  }
+
+  // Оповещает всех друзей пользователя об изменении его online-статуса
+  // (вызывается при входе/выходе), чтобы точки статуса в списке друзей
+  // обновлялись вживую, без ручного обновления списка.
+  async function notifyFriendsPresence(username, online) {
+    const acc = await dbGetAccount(username);
+    if (!acc || !Array.isArray(acc.friends)) return;
+    acc.friends.forEach(f => sendToUser(f, { action: 'friend_presence', username, online }));
+  }
+
   // Если участник, поделившийся трафаретом клана, уходит (кик/выход) —
   // трафарет нужно автоматически снять, иначе он "осиротеет" и останется
   // висеть на холсте у всех навечно без возможности его убрать.
@@ -1122,7 +1276,11 @@ initDatabases().then(async () => {
                   inventory:      {},
                   upgrades:       [],
                   active_stencil: null,
-                  saved_stencils: []
+                  saved_stencils: [],
+                  friends:             [],
+                  friend_requests_in:  [],
+                  friend_requests_out: [],
+                  dm_reads:            {},
                 };
                 await dbSaveAccount(username, acc);
               } else if (!acc.discord_id) {
@@ -1141,6 +1299,10 @@ initDatabases().then(async () => {
               ws.userData.inventory      = ws.userData.inventory      || {};
               ws.userData.upgrades       = ws.userData.upgrades       || [];
               ws.userData.saved_stencils = ws.userData.saved_stencils || [];
+              ws.userData.friends              = ws.userData.friends              || [];
+              ws.userData.friend_requests_in   = ws.userData.friend_requests_in   || [];
+              ws.userData.friend_requests_out  = ws.userData.friend_requests_out  || [];
+              ws.userData.dm_reads             = ws.userData.dm_reads             || {};
 
               let clientItems = [...ws.userData.upgrades];
               for (let k in ws.userData.inventory) {
@@ -1162,8 +1324,12 @@ initDatabases().then(async () => {
                 settings:        serverSettings,
                 stencil:         ws.userData.active_stencil,
                 saved_stencils:  ws.userData.saved_stencils,
+                friends:              ws.userData.friends              || [],
+                friend_requests_in:   ws.userData.friend_requests_in   || [],
+                friend_requests_out:  ws.userData.friend_requests_out  || [],
               }));
               broadcastOnlineCount();
+              notifyFriendsPresence(ws.userData.username, true);
               ws.send(canvasData);
               return;
 
@@ -1188,7 +1354,7 @@ initDatabases().then(async () => {
             if (existing) { ws.send(JSON.stringify({ action:'toast', message:'Ник уже занят!' })); return; }
             let role = 'user';
             if ((username === 'd3cord' && email === 'otarasik10@gmail.com') || username === ADMIN_USERNAME) role = 'admin';
-            const newUser = { username, password, email, role, pixels: 0, rank: 'Новичок', emoji: '👾', banned: false, timeout_until: 0, coins: 0, clan: '', inventory: {}, upgrades: [], active_stencil: null, saved_stencils: [] };
+            const newUser = { username, password, email, role, pixels: 0, rank: 'Новичок', emoji: '👾', banned: false, timeout_until: 0, coins: 0, clan: '', inventory: {}, upgrades: [], active_stencil: null, saved_stencils: [], friends: [], friend_requests_in: [], friend_requests_out: [], dm_reads: {} };
             await dbSaveAccount(username, newUser);
             ws.userData = { ...newUser };
           } else {
@@ -1205,6 +1371,10 @@ initDatabases().then(async () => {
           ws.userData.inventory = ws.userData.inventory || {};
           ws.userData.upgrades  = ws.userData.upgrades  || [];
           ws.userData.saved_stencils = ws.userData.saved_stencils || [];
+          ws.userData.friends              = ws.userData.friends              || [];
+          ws.userData.friend_requests_in   = ws.userData.friend_requests_in   || [];
+          ws.userData.friend_requests_out  = ws.userData.friend_requests_out  || [];
+          ws.userData.dm_reads             = ws.userData.dm_reads             || {};
 
           let clientItems = [...ws.userData.upgrades];
           for (let k in ws.userData.inventory) {
@@ -1225,9 +1395,13 @@ initDatabases().then(async () => {
             canvas_h:  CANVAS_HEIGHT,
             settings:  serverSettings,
             stencil:   ws.userData.active_stencil,
-            saved_stencils: ws.userData.saved_stencils
+            saved_stencils: ws.userData.saved_stencils,
+            friends:              ws.userData.friends              || [],
+            friend_requests_in:   ws.userData.friend_requests_in   || [],
+            friend_requests_out:  ws.userData.friend_requests_out  || [],
           }));
           broadcastOnlineCount();
+          notifyFriendsPresence(ws.userData.username, true);
           ws.send(canvasData);
         }
 
@@ -1319,6 +1493,214 @@ initDatabases().then(async () => {
           if (!text) return;
           const msg = { username: ws.userData.username, emoji: ws.userData.emoji||'👾', text, ts: Date.now() };
           broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_chat_message', msg }), null);
+        }
+
+        // ══════════════════════════════════════════════════════
+        //  СОЦИАЛЬНАЯ СЕТЬ: поиск людей, друзья, личные сообщения
+        // ══════════════════════════════════════════════════════
+        else if (action === 'user_search') {
+          if (!ws.isAuthorized) return;
+          const q = (data.query || '').trim().toLowerCase();
+          if (!q) { ws.send(JSON.stringify({ action:'user_search_results', query:'', results:[] })); return; }
+          const all = await dbGetAllAccounts();
+          const me  = ws.userData;
+          const results = all
+            .filter(a => a.username && a.username !== me.username && a.username.toLowerCase().includes(q))
+            .slice(0, 25)
+            .map(a => userCard(a, {
+              isFriend:        (me.friends || []).includes(a.username),
+              requestSent:     (me.friend_requests_out || []).includes(a.username),
+              requestReceived: (me.friend_requests_in  || []).includes(a.username),
+            }));
+          ws.send(JSON.stringify({ action:'user_search_results', query: data.query || '', results }));
+        }
+
+        else if (action === 'friends_get') {
+          if (!ws.isAuthorized) return;
+          await sendFriendsUpdate(ws.userData.username);
+        }
+
+        else if (action === 'friend_request') {
+          if (!ws.isAuthorized) return;
+          const target = (data.to || '').trim();
+          const me = ws.userData.username;
+          if (!target || target === me) return;
+          const targetAcc = await dbGetAccount(target);
+          if (!targetAcc) { ws.send(JSON.stringify({ action:'toast', message:'Пользователь не найден' })); return; }
+          const meAcc = await dbGetAccount(me);
+          if ((meAcc.friends || []).includes(target)) { ws.send(JSON.stringify({ action:'toast', message:'Вы уже друзья' })); return; }
+          if ((meAcc.friend_requests_out || []).includes(target)) { ws.send(JSON.stringify({ action:'toast', message:'Заявка уже отправлена' })); return; }
+
+          // Встречная заявка — если target уже приглашал нас, сразу дружим
+          if ((meAcc.friend_requests_in || []).includes(target)) {
+            const meFriends = Array.from(new Set([...(meAcc.friends || []), target]));
+            const meIn      = (meAcc.friend_requests_in || []).filter(u => u !== target);
+            await dbSaveAccount(me, { friends: meFriends, friend_requests_in: meIn });
+            ws.userData.friends = meFriends; ws.userData.friend_requests_in = meIn;
+
+            const tFriends = Array.from(new Set([...(targetAcc.friends || []), me]));
+            const tOut     = (targetAcc.friend_requests_out || []).filter(u => u !== me);
+            await dbSaveAccount(target, { friends: tFriends, friend_requests_out: tOut });
+
+            await sendFriendsUpdate(me);
+            await sendFriendsUpdate(target);
+            sendToUser(target, { action:'toast', message:`✅ ${me} теперь у вас в друзьях!`, type:'success' });
+            ws.send(JSON.stringify({ action:'toast', message:`✅ Вы подружились с ${target}!`, type:'success' }));
+            return;
+          }
+
+          const meOut = Array.from(new Set([...(meAcc.friend_requests_out || []), target]));
+          await dbSaveAccount(me, { friend_requests_out: meOut });
+          ws.userData.friend_requests_out = meOut;
+
+          const tIn = Array.from(new Set([...(targetAcc.friend_requests_in || []), me]));
+          await dbSaveAccount(target, { friend_requests_in: tIn });
+
+          await sendFriendsUpdate(me);
+          await sendFriendsUpdate(target);
+          sendToUser(target, { action:'toast', message:`👋 ${me} хочет добавить вас в друзья`, type:'info' });
+        }
+
+        else if (action === 'friend_accept') {
+          if (!ws.isAuthorized) return;
+          const from = (data.from || '').trim();
+          const me   = ws.userData.username;
+          const meAcc = await dbGetAccount(me);
+          if (!from || !(meAcc.friend_requests_in || []).includes(from)) return;
+          const fromAcc = await dbGetAccount(from);
+
+          const meFriends = Array.from(new Set([...(meAcc.friends || []), from]));
+          const meIn      = (meAcc.friend_requests_in || []).filter(u => u !== from);
+          await dbSaveAccount(me, { friends: meFriends, friend_requests_in: meIn });
+          ws.userData.friends = meFriends; ws.userData.friend_requests_in = meIn;
+
+          if (fromAcc) {
+            const fFriends = Array.from(new Set([...(fromAcc.friends || []), me]));
+            const fOut     = (fromAcc.friend_requests_out || []).filter(u => u !== me);
+            await dbSaveAccount(from, { friends: fFriends, friend_requests_out: fOut });
+          }
+
+          await sendFriendsUpdate(me);
+          await sendFriendsUpdate(from);
+          sendToUser(from, { action:'toast', message:`✅ ${me} принял(а) вашу заявку в друзья!`, type:'success' });
+        }
+
+        else if (action === 'friend_decline') {
+          if (!ws.isAuthorized) return;
+          const from = (data.from || '').trim();
+          const me   = ws.userData.username;
+          const meAcc = await dbGetAccount(me);
+          const meIn  = (meAcc.friend_requests_in || []).filter(u => u !== from);
+          await dbSaveAccount(me, { friend_requests_in: meIn });
+          ws.userData.friend_requests_in = meIn;
+
+          const fromAcc = await dbGetAccount(from);
+          if (fromAcc) {
+            const fOut = (fromAcc.friend_requests_out || []).filter(u => u !== me);
+            await dbSaveAccount(from, { friend_requests_out: fOut });
+          }
+          await sendFriendsUpdate(me);
+          await sendFriendsUpdate(from);
+        }
+
+        else if (action === 'friend_cancel') {
+          if (!ws.isAuthorized) return;
+          const to  = (data.to || '').trim();
+          const me  = ws.userData.username;
+          const meAcc = await dbGetAccount(me);
+          const meOut = (meAcc.friend_requests_out || []).filter(u => u !== to);
+          await dbSaveAccount(me, { friend_requests_out: meOut });
+          ws.userData.friend_requests_out = meOut;
+
+          const toAcc = await dbGetAccount(to);
+          if (toAcc) {
+            const tIn = (toAcc.friend_requests_in || []).filter(u => u !== me);
+            await dbSaveAccount(to, { friend_requests_in: tIn });
+          }
+          await sendFriendsUpdate(me);
+          await sendFriendsUpdate(to);
+        }
+
+        else if (action === 'friend_remove') {
+          if (!ws.isAuthorized) return;
+          const target = (data.username || '').trim();
+          const me = ws.userData.username;
+          const meAcc = await dbGetAccount(me);
+          const meFriends = (meAcc.friends || []).filter(u => u !== target);
+          await dbSaveAccount(me, { friends: meFriends });
+          ws.userData.friends = meFriends;
+
+          const tAcc = await dbGetAccount(target);
+          if (tAcc) {
+            const tFriends = (tAcc.friends || []).filter(u => u !== me);
+            await dbSaveAccount(target, { friends: tFriends });
+          }
+          await sendFriendsUpdate(me);
+          await sendFriendsUpdate(target);
+        }
+
+        else if (action === 'dm_send') {
+          if (!ws.isAuthorized) return;
+          const to   = (data.to || '').trim();
+          const me   = ws.userData.username;
+          const text = (data.text || '').trim().slice(0, 1000);
+          if (!to || !text || to === me) return;
+          const toAcc = await dbGetAccount(to);
+          if (!toAcc) { ws.send(JSON.stringify({ action:'toast', message:'Пользователь не найден' })); return; }
+          const msg = { from: me, text, ts: Date.now() };
+          await dbAppendDMMessage(me, to, msg);
+          sendToUser(me, { action:'dm_message', peer: to, msg });
+          sendToUser(to,  { action:'dm_message', peer: me, msg });
+        }
+
+        else if (action === 'dm_history') {
+          if (!ws.isAuthorized) return;
+          const withUser = (data.with || '').trim();
+          const me = ws.userData.username;
+          if (!withUser) return;
+          const thread = await dbGetDMThread(me, withUser);
+          ws.send(JSON.stringify({ action:'dm_history_data', with: withUser, messages: thread.messages || [] }));
+        }
+
+        else if (action === 'dm_mark_read') {
+          if (!ws.isAuthorized) return;
+          const withUser = (data.with || '').trim();
+          if (!withUser) return;
+          const reads = { ...(ws.userData.dm_reads || {}), [withUser]: Date.now() };
+          ws.userData.dm_reads = reads;
+          await dbSaveAccount(ws.userData.username, { dm_reads: reads });
+        }
+
+        else if (action === 'dm_conversations') {
+          if (!ws.isAuthorized) return;
+          const me = ws.userData.username;
+          const meAcc = await dbGetAccount(me);
+          const partners = new Set([...(meAcc.friends || []), ...(await dbGetDMPartners(me))]);
+          const reads = meAcc.dm_reads || {};
+          const list = [];
+          for (const p of partners) {
+            const pAcc = await dbGetAccount(p);
+            if (!pAcc) continue;
+            const thread   = await dbGetDMThread(me, p);
+            const messages = thread.messages || [];
+            const last     = messages[messages.length - 1] || null;
+            const lastRead = reads[p] || 0;
+            const unread   = messages.filter(m => m.from === p && m.ts > lastRead).length;
+            list.push({
+              ...userCard(pAcc),
+              lastMessage: last ? last.text : '',
+              lastFrom:    last ? last.from : '',
+              lastTs:      last ? last.ts : 0,
+              unread,
+            });
+          }
+          list.sort((a, b) => b.lastTs - a.lastTs);
+          ws.send(JSON.stringify({ action:'dm_conversations_data', conversations: list }));
+        }
+
+        else if (action === 'online_users_get') {
+          if (!ws.isAuthorized) return;
+          ws.send(JSON.stringify({ action:'online_users_data', users: getOnlineUsersSnapshot(ws.userData.username) }));
         }
 
         else if (action === 'clan_create') {
@@ -2383,7 +2765,10 @@ initDatabases().then(async () => {
       }
     });
 
-    ws.on('close', () => { broadcastOnlineCount(); });
+    ws.on('close', () => {
+      broadcastOnlineCount();
+      if (ws.isAuthorized && ws.userData?.username) notifyFriendsPresence(ws.userData.username, false);
+    });
     ws.on('error', () => {});
   });
 
