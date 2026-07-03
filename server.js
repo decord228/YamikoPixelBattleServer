@@ -1653,6 +1653,18 @@ initDatabases().then(async () => {
           sendToUser(to,  { action:'dm_message', peer: me, msg });
         }
 
+        else if (action === 'typing') {
+          if (!ws.isAuthorized) return;
+          const me = ws.userData.username;
+          const to = (data.to || '').trim();
+          if (to) {
+            sendToUser(to, { action:'typing', from: me, channel:false });
+          } else {
+            const msg = JSON.stringify({ action:'typing', from: me, channel:true });
+            wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized && c !== ws) c.send(msg); });
+          }
+        }
+
         else if (action === 'dm_history') {
           if (!ws.isAuthorized) return;
           const withUser = (data.with || '').trim();
