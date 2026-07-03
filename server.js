@@ -58,6 +58,109 @@ function getAvatarUrl(acc) {
   return `https://cdn.discordapp.com/avatars/${acc.discord_id}/${acc.discord_avatar}.${ext}?size=128`;
 }
 
+// ── БАННЕРЫ ПРОФИЛЯ (Этап 2) ──
+// Единая точка правды для каталога баннеров — и сервер (валидация покупки/
+// выбора), и клиент (рисует список) используют ИМЕННО этот массив: сервер
+// отдаёт его целиком клиенту в auth_success (поле banners_catalog).
+//
+// Экономика — строго по ТЗ:
+//   'free'     — доступен всем сразу (без owned_banners). ОДНОТОННЫЕ цвета
+//                (поле css — просто hex, БЕЗ градиента). Раньше здесь по
+//                ошибке лежали градиенты — перепутали с платным тиром,
+//                см. запись в REWORK_PLAN про фикс этого места.
+//   'gradient' — CSS-градиент (поле css), фиксированная цена 10 монет
+//                (ТЗ: "за 10 монет ставить градиент баннеры профиля") —
+//                НЕ 150-200, это была та же путаница со свободным тиром.
+//   'animated' — анимированный баннер, 100-1000 монет по сложности/красоте
+//                (ТЗ: "простенькие" от 100 до "сложные" 1000). Два источника
+//                в одном тире:
+//                  1) встроенные CSS-анимации (PROFILE_BANNERS_ANIMATED_CSS
+//                     ниже) — реальная анимация без файлов, доступна сразу
+//                     из коробки;
+//                  2) картинки/гифки из resources/banners/manifest.json —
+//                     админ вручную кладёт файл в папку и дописывает строку
+//                     в манифест (id/file/name/cost 100-1000), без правки
+//                     кода (правило №5 плана).
+const PROFILE_BANNERS_BUILTIN = [
+  { id:'banner_none',    tier:'free', name:'Без баннера',   cost:0, css:null },
+  { id:'banner_c_white', tier:'free', name:'Белый',         cost:0, css:'#e4e4e4' },
+  { id:'banner_c_slate', tier:'free', name:'Графит',        cost:0, css:'#3a3a3a' },
+  { id:'banner_c_black', tier:'free', name:'Чёрный',        cost:0, css:'#1a1a1a' },
+  { id:'banner_c_red',   tier:'free', name:'Красный',       cost:0, css:'#e40000' },
+  { id:'banner_c_orange',tier:'free', name:'Оранжевый',     cost:0, css:'#ff9600' },
+  { id:'banner_c_yellow',tier:'free', name:'Жёлтый',        cost:0, css:'#ffd635' },
+  { id:'banner_c_green', tier:'free', name:'Зелёный',       cost:0, css:'#00a368' },
+  { id:'banner_c_teal',  tier:'free', name:'Бирюзовый',     cost:0, css:'#009eaa' },
+  { id:'banner_c_blue',  tier:'free', name:'Синий',         cost:0, css:'#2450a4' },
+  { id:'banner_c_indigo',tier:'free', name:'Индиго',        cost:0, css:'#493ac1' },
+  { id:'banner_c_purple',tier:'free', name:'Пурпурный',     cost:0, css:'#811e9f' },
+  { id:'banner_c_pink',  tier:'free', name:'Розовый',       cost:0, css:'#ff6392' },
+
+  { id:'banner_sunset',  tier:'gradient', name:'Закат',    cost:10, css:'linear-gradient(135deg,#ff9600,#d40078)' },
+  { id:'banner_ocean',   tier:'gradient', name:'Океан',    cost:10, css:'linear-gradient(135deg,#00756f,#2450a4)' },
+  { id:'banner_forest',  tier:'gradient', name:'Лес',      cost:10, css:'linear-gradient(135deg,#006030,#7eed56)' },
+  { id:'banner_royal',   tier:'gradient', name:'Аметист',  cost:10, css:'linear-gradient(135deg,#493ac1,#b44ac0)' },
+  { id:'banner_flame',   tier:'gradient', name:'Пламя',    cost:10, css:'linear-gradient(135deg,#8a0022,#ff9600)' },
+  { id:'banner_mint',    tier:'gradient', name:'Мята',     cost:10, css:'linear-gradient(135deg,#00a368,#51e9f4)' },
+  { id:'banner_candy',   tier:'gradient', name:'Малина',   cost:10, css:'linear-gradient(135deg,#d40078,#ff99aa)' },
+  { id:'banner_slate_g', tier:'gradient', name:'Графит',   cost:10, css:'linear-gradient(135deg,#1a1a1a,#3a3a3a)' },
+  { id:'banner_indigo_g',tier:'gradient', name:'Индиго',   cost:10, css:'linear-gradient(135deg,#1d2b53,#493ac1)' },
+];
+
+// Встроенные анимированные баннеры (CSS keyframes, см. .pbanner-anim-* в
+// style.css) — не требуют файлов, доступны сразу. `anim` — имя CSS-класса
+// с анимацией, `css` — фон под ней (градиент/цвет, участвует в кадрах).
+// Цена растёт по числу "слоёв"/сложности анимации, как просил заказчик.
+const PROFILE_BANNERS_ANIMATED_CSS = [
+  { id:'banner_a_pulse',    tier:'animated', name:'Пульс',        cost:100,  anim:'pbanner-anim-pulse',    css:'linear-gradient(135deg,#493ac1,#3690ea)' },
+  { id:'banner_a_tide',     tier:'animated', name:'Прилив',       cost:250,  anim:'pbanner-anim-tide',     css:'linear-gradient(120deg,#00756f,#2450a4,#00756f)' },
+  { id:'banner_a_aurora',   tier:'animated', name:'Аврора',       cost:450,  anim:'pbanner-anim-aurora',   css:'linear-gradient(120deg,#006030,#493ac1,#d40078,#006030)' },
+  { id:'banner_a_stardust', tier:'animated', name:'Звёздная пыль',cost:700,  anim:'pbanner-anim-stardust', css:'linear-gradient(135deg,#0a0a14,#1d2b53)' },
+  { id:'banner_a_rainbow',  tier:'animated', name:'Радуга',       cost:1000, anim:'pbanner-anim-rainbow',  css:'linear-gradient(90deg,#e40000,#ff9600,#ffd635,#00a368,#2450a4,#811e9f,#e40000)' },
+];
+
+const BANNERS_DIR          = path.join(__dirname, 'resources', 'banners');
+const BANNERS_MANIFEST_FILE = path.join(BANNERS_DIR, 'manifest.json');
+
+// Читает resources/banners/manifest.json → [{id,file,name,cost}] и строит
+// из него animated-тир каталога (наравне со встроенными CSS-анимациями
+// выше — оба источника пишутся в один тир 'animated'). Файлы раздаются как
+// обычные статики — весь корень проекта уже смонтирован через
+// express.static (см. ниже), так что никакого отдельного роута/прокси не
+// нужно (в отличие от внешних доменов вроде Cloudinary — см.
+// getProxiedImageUrl на клиенте).
+// Цена (по ТЗ): 100 монет — простенькие гифки, 1000 — сложные/красивые.
+// Пример строки манифеста: {"id":"banner_gif_dragon","file":"dragon.gif","name":"Дракон","cost":600}
+function loadAnimatedBanners() {
+  try {
+    if (!fs.existsSync(BANNERS_MANIFEST_FILE)) return [];
+    const raw = JSON.parse(fs.readFileSync(BANNERS_MANIFEST_FILE, 'utf8'));
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter(e => e && e.id && e.file)
+      .map(e => ({
+        id:   e.id,
+        tier: 'animated',
+        name: e.name || e.id,
+        cost: Number.isFinite(Number(e.cost)) ? Number(e.cost) : 0,
+        url:  `/resources/banners/${e.file}`,
+      }));
+  } catch (e) {
+    console.error('❌ loadAnimatedBanners:', e.message);
+    return [];
+  }
+}
+
+// Считаем один раз при старте процесса — если админ добавит баннер в манифест
+// без релога сервера, он появится после следующего рестарта/деплоя (то же
+// поведение, что и у остального статического конфига проекта).
+const PROFILE_BANNERS = PROFILE_BANNERS_BUILTIN.concat(PROFILE_BANNERS_ANIMATED_CSS, loadAnimatedBanners());
+
+function getBannerById(id) {
+  if (!id) return null;
+  return PROFILE_BANNERS.find(b => b.id === id) || null;
+}
+
 function getOrCreateOwnerId(username, emoji, avatar) {
   if (ownerIdMap.has(username)) {
     // Обновим emoji/avatar на случай если пользователь их сменил
@@ -189,6 +292,15 @@ if (mongoose) {
     friend_requests_in:  { type: [String], default: [] }, // входящие заявки в друзья (кто добавил меня)
     friend_requests_out: { type: [String], default: [] }, // исходящие заявки в друзья (кого добавил я)
     dm_reads:            { type: Object,   default: {} }, // { peerUsername: timestamp последнего прочтения переписки }
+
+    // ── БАННЕР ПРОФИЛЯ (Этап 2) ──
+    // banner_id хранит только id из каталога PROFILE_BANNERS (см. ниже) —
+    // ни картинка, ни градиент в БД не лежат, только ссылка на пресет.
+    // Бесплатные баннеры (tier:'free') равнодоступны всем и не требуют
+    // владения; gradient/animated нужно один раз купить — id оседает в
+    // owned_banners навсегда.
+    banner_id:           { type: String,   default: null },
+    owned_banners:       { type: [String], default: [] },
   }, { timestamps: true, autoIndex: false });
 
   const ClanSchema = new mongoose.Schema({
@@ -431,7 +543,22 @@ async function dbGetClan(name) {
       if (doc) clans[name] = { ...clans[name], ...doc };
     } catch(e) { console.error(`❌ dbGetClan(${name}):`, e.message); }
   }
-  return ensureClanRanks(clans[name] || null);
+  const clan = ensureClanRanks(clans[name] || null);
+  if (clan) {
+    // Карточки участников (аватар/эмодзи/ранг/баннер) — раньше клиент брал
+    // это только из cpUserCache (заполняется чатом/онлайн-списком), поэтому
+    // офлайн-участник или тот, кто ни разу не писал в чат, показывался с
+    // заглушкой вместо реальной аватарки (см. REWORK_PLAN, Этап 1, "НЕ
+    // тронуто"). Теперь это отдаётся прямо с сервером вместе с клан-данными —
+    // единая точка правды, не завязанная на то, что клиент "видел" юзера.
+    const cards = {};
+    await Promise.all((clan.members || []).map(async (u) => {
+      const acc = await dbGetAccount(u);
+      if (acc) cards[u] = { emoji: acc.emoji || '👾', avatar: getAvatarUrl(acc), rank: acc.rank || 'Новичок', banner: acc.banner_id || null };
+    }));
+    clan.member_cards = cards;
+  }
+  return clan;
 }
 
 async function dbSaveClan(name, data) {
@@ -1000,6 +1127,7 @@ initDatabases().then(async () => {
           username: c.userData.username,
           emoji:    c.userData.emoji || '👾',
           avatar:   getAvatarUrl(c.userData),
+          banner:   c.userData.banner_id || null,
           role:     c.userData.role  || 'user',
           rank:     c.userData.rank  || 'Новичок',
           clan:     c.userData.clan  || '',
@@ -1017,6 +1145,7 @@ initDatabases().then(async () => {
       username: acc.username,
       emoji:    acc.emoji || '👾',
       avatar:   getAvatarUrl(acc),
+      banner:   acc.banner_id || null,
       role:     acc.role  || 'user',
       rank:     acc.rank  || 'Новичок',
       clan:     acc.clan  || '',
@@ -1295,6 +1424,8 @@ initDatabases().then(async () => {
                   friend_requests_in:  [],
                   friend_requests_out: [],
                   dm_reads:            {},
+                  banner_id:           null,
+                  owned_banners:       [],
                 };
                 await dbSaveAccount(username, acc);
               } else {
@@ -1324,6 +1455,7 @@ initDatabases().then(async () => {
               ws.userData.friend_requests_in   = ws.userData.friend_requests_in   || [];
               ws.userData.friend_requests_out  = ws.userData.friend_requests_out  || [];
               ws.userData.dm_reads             = ws.userData.dm_reads             || {};
+              ws.userData.owned_banners        = ws.userData.owned_banners        || [];
 
               let clientItems = [...ws.userData.upgrades];
               for (let k in ws.userData.inventory) {
@@ -1338,6 +1470,9 @@ initDatabases().then(async () => {
                 rank:            ws.userData.rank      || 'Новичок',
                 emoji:           ws.userData.emoji     || '👾',
                 avatar:          getAvatarUrl(ws.userData),
+                banner:          ws.userData.banner_id    || null,
+                owned_banners:   ws.userData.owned_banners || [],
+                banners_catalog: PROFILE_BANNERS,
                 coins:           ws.userData.coins     || 0,
                 clan:            ws.userData.clan      || '',
                 purchased_items: clientItems,
@@ -1376,7 +1511,7 @@ initDatabases().then(async () => {
             if (existing) { ws.send(JSON.stringify({ action:'toast', message:'Ник уже занят!' })); return; }
             let role = 'user';
             if ((username === 'd3cord' && email === 'otarasik10@gmail.com') || username === ADMIN_USERNAME) role = 'admin';
-            const newUser = { username, password, email, role, pixels: 0, rank: 'Новичок', emoji: '👾', banned: false, timeout_until: 0, coins: 0, clan: '', inventory: {}, upgrades: [], active_stencil: null, saved_stencils: [], friends: [], friend_requests_in: [], friend_requests_out: [], dm_reads: {} };
+            const newUser = { username, password, email, role, pixels: 0, rank: 'Новичок', emoji: '👾', banned: false, timeout_until: 0, coins: 0, clan: '', inventory: {}, upgrades: [], active_stencil: null, saved_stencils: [], friends: [], friend_requests_in: [], friend_requests_out: [], dm_reads: {}, banner_id: null, owned_banners: [] };
             await dbSaveAccount(username, newUser);
             ws.userData = { ...newUser };
           } else {
@@ -1397,6 +1532,7 @@ initDatabases().then(async () => {
           ws.userData.friend_requests_in   = ws.userData.friend_requests_in   || [];
           ws.userData.friend_requests_out  = ws.userData.friend_requests_out  || [];
           ws.userData.dm_reads             = ws.userData.dm_reads             || {};
+          ws.userData.owned_banners        = ws.userData.owned_banners        || [];
 
           let clientItems = [...ws.userData.upgrades];
           for (let k in ws.userData.inventory) {
@@ -1411,6 +1547,9 @@ initDatabases().then(async () => {
             rank:      ws.userData.rank      || 'Новичок',
             emoji:     ws.userData.emoji     || '👾',
             avatar:    getAvatarUrl(ws.userData),
+            banner:          ws.userData.banner_id    || null,
+            owned_banners:   ws.userData.owned_banners || [],
+            banners_catalog: PROFILE_BANNERS,
             coins:     ws.userData.coins     || 0,
             clan:      ws.userData.clan      || '',
             purchased_items: clientItems,
@@ -1457,7 +1596,7 @@ initDatabases().then(async () => {
         else if (action === 'get_leaderboard') {
           const allAccs  = await dbGetAllAccounts();
           const players  = allAccs
-            .map(a => ({ username: a.username, pixels: a.pixels||0, emoji: a.emoji||'👾', avatar: getAvatarUrl(a), rank: a.rank||'Новичок' }))
+            .map(a => ({ username: a.username, pixels: a.pixels||0, emoji: a.emoji||'👾', avatar: getAvatarUrl(a), banner: a.banner_id||null, rank: a.rank||'Новичок' }))
             .sort((a, b) => b.pixels - a.pixels).slice(0, 30);
           const allClans = await dbGetAllClans();
           const clanTop  = allClans
@@ -2273,6 +2412,55 @@ initDatabases().then(async () => {
         else if (action === 'use_item') {
           if (!ws.isAuthorized) return;
           await useConsumable(ws, data.item_id || data.itemId, data);
+        }
+
+        // ── БАННЕР ПРОФИЛЯ (Этап 2) ──
+        // banner_select — надеть баннер, который уже доступен (free-тир или
+        // уже куплен). banner_buy — купить платный (gradient/animated) и
+        // сразу же надеть. Разделены, чтобы клиент мог просто "переключать"
+        // уже открытые баннеры без похода в магазин каждый раз.
+        else if (action === 'banner_select') {
+          if (!ws.isAuthorized) return;
+          const bannerId = data.banner_id || null;
+
+          if (bannerId === null) {
+            // Явный сброс — "без баннера" всегда доступен.
+          } else {
+            const banner = getBannerById(bannerId);
+            if (!banner) { ws.send(JSON.stringify({ action:'toast', message:'Баннер не найден' })); return; }
+            const owned = banner.tier === 'free' || (ws.userData.owned_banners || []).includes(bannerId);
+            if (!owned) { ws.send(JSON.stringify({ action:'toast', message:'Этот баннер ещё не куплен' })); return; }
+          }
+
+          ws.userData.banner_id = bannerId;
+          await dbSaveAccount(ws.userData.username, { banner_id: bannerId });
+          ws.send(JSON.stringify({ action:'banner_update', banner: bannerId, owned_banners: ws.userData.owned_banners || [], coins: ws.userData.coins || 0, message:'Баннер обновлён' }));
+          if (ws.userData.clan) broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_data', clan: await dbGetClan(ws.userData.clan) }), null);
+        }
+
+        else if (action === 'banner_buy') {
+          if (!ws.isAuthorized) return;
+          const bannerId = data.banner_id;
+          const banner = getBannerById(bannerId);
+          if (!banner) { ws.send(JSON.stringify({ action:'toast', message:'Баннер не найден' })); return; }
+          if (banner.tier === 'free') { ws.send(JSON.stringify({ action:'toast', message:'Этот баннер и так бесплатный — просто выберите его' })); return; }
+
+          const acc = await dbGetAccount(ws.userData.username);
+          const owned = acc.owned_banners || [];
+          if (owned.includes(bannerId)) { ws.send(JSON.stringify({ action:'toast', message:'Уже куплено!' })); return; }
+          if ((acc.coins || 0) < banner.cost) {
+            ws.send(JSON.stringify({ action:'toast', message:`Нужно ${banner.cost} монет. У вас ${Math.floor(acc.coins||0)}` })); return;
+          }
+
+          const newCoins = (acc.coins || 0) - banner.cost;
+          const newOwned = [...owned, bannerId];
+          await dbSaveAccount(ws.userData.username, { coins: newCoins, owned_banners: newOwned, banner_id: bannerId });
+          ws.userData.coins         = newCoins;
+          ws.userData.owned_banners = newOwned;
+          ws.userData.banner_id     = bannerId;
+
+          ws.send(JSON.stringify({ action:'banner_update', banner: bannerId, owned_banners: newOwned, coins: newCoins, message:`✅ Куплено: ${banner.name}` }));
+          if (ws.userData.clan) broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_data', clan: await dbGetClan(ws.userData.clan) }), null);
         }
 
         // ══════════════════════════════════════════════════
