@@ -1728,6 +1728,7 @@ initDatabases().then(async () => {
               isFriend:        (me.friends || []).includes(acc.username),
               requestSent:     (me.friend_requests_out || []).includes(acc.username),
               requestReceived: (me.friend_requests_in  || []).includes(acc.username),
+              owned_banners:   acc.owned_banners || [],
             }),
           }));
         }
