@@ -48,22 +48,32 @@ const ownerDataMap = new Map(); // id → { username, emoji }
 let nextOwnerId    = 1;
 let ownersDirty    = false;
 
-function getOrCreateOwnerId(username, emoji) {
+// ── DISCORD AVATAR URL ──
+// Строит CDN-ссылку на аватарку Discord из discord_id + avatar hash аккаунта.
+// Возвращает null, если у аккаунта нет привязанного Discord-аватара —
+// в этом случае клиент показывает дефолтную заглушку.
+function getAvatarUrl(acc) {
+  if (!acc || !acc.discord_id || !acc.discord_avatar) return null;
+  const ext = acc.discord_avatar.startsWith('a_') ? 'gif' : 'png';
+  return `https://cdn.discordapp.com/avatars/${acc.discord_id}/${acc.discord_avatar}.${ext}?size=128`;
+}
+
+function getOrCreateOwnerId(username, emoji, avatar) {
   if (ownerIdMap.has(username)) {
-    // Обновим emoji на случай если пользователь его сменил
+    // Обновим emoji/avatar на случай если пользователь их сменил
     const id = ownerIdMap.get(username);
-    ownerDataMap.set(id, { username, emoji: emoji || '👾' });
+    ownerDataMap.set(id, { username, emoji: emoji || '👾', avatar: avatar || null });
     return id;
   }
   const id = nextOwnerId++;
   ownerIdMap.set(username, id);
-  ownerDataMap.set(id, { username, emoji: emoji || '👾' });
+  ownerDataMap.set(id, { username, emoji: emoji || '👾', avatar: avatar || null });
   return id;
 }
 
-function setPixelOwner(x, y, username, emoji) {
+function setPixelOwner(x, y, username, emoji, avatar) {
   if (!pixelOwners || x < 0 || x >= CANVAS_WIDTH || y < 0 || y >= CANVAS_HEIGHT) return;
-  const id = getOrCreateOwnerId(username, emoji);
+  const id = getOrCreateOwnerId(username, emoji, avatar);
   pixelOwners[y * CANVAS_WIDTH + x] = id;
   ownersDirty = true;
 }
@@ -159,6 +169,7 @@ if (mongoose) {
     username:          { type: String, unique: true, index: true },
     password:          String,
     discord_id:        { type: String, default: '', index: true }, // ← Discord Activity
+    discord_avatar:    { type: String, default: '' }, // ← hash аватарки Discord (avatar hash из /users/@me)
     email:             String,
     role:              { type: String, default: 'user' }, 
     pixels:            { type: Number, default: 0 },
@@ -684,7 +695,7 @@ async function initDatabases() {
       let maxId = 0;
       for (const entry of ids) {
         ownerIdMap.set(entry.username, entry.id);
-        ownerDataMap.set(entry.id, { username: entry.username, emoji: entry.emoji || '👾' });
+        ownerDataMap.set(entry.id, { username: entry.username, emoji: entry.emoji || '👾', avatar: entry.avatar || null });
         if (entry.id > maxId) maxId = entry.id;
       }
       nextOwnerId = maxId + 1;
@@ -729,7 +740,7 @@ async function persistCanvas() {
       const idsArr = [];
       for (const [username, id] of ownerIdMap.entries()) {
         const data = ownerDataMap.get(id);
-        idsArr.push({ id, username, emoji: data?.emoji || '👾' });
+        idsArr.push({ id, username, emoji: data?.emoji || '👾', avatar: data?.avatar || null });
       }
       fs.writeFileSync(PIXEL_IDS_FILE, JSON.stringify(idsArr));
     } catch(e) { console.error('❌ pixel_owner_ids.json save:', e.message); }
@@ -988,6 +999,7 @@ initDatabases().then(async () => {
         seen.set(c.userData.username, {
           username: c.userData.username,
           emoji:    c.userData.emoji || '👾',
+          avatar:   getAvatarUrl(c.userData),
           role:     c.userData.role  || 'user',
           rank:     c.userData.rank  || 'Новичок',
           clan:     c.userData.clan  || '',
@@ -1004,6 +1016,7 @@ initDatabases().then(async () => {
     return {
       username: acc.username,
       emoji:    acc.emoji || '👾',
+      avatar:   getAvatarUrl(acc),
       role:     acc.role  || 'user',
       rank:     acc.rank  || 'Новичок',
       clan:     acc.clan  || '',
@@ -1204,7 +1217,7 @@ initDatabases().then(async () => {
 
         if (x >= 0 && x < CANVAS_WIDTH && y >= 0 && y < CANVAS_HEIGHT && colorIdx >= 0 && colorIdx < 32) {
           canvasData[y * CANVAS_WIDTH + x] = colorIdx;
-          setPixelOwner(x, y, acc.username, acc.emoji || '👾');
+          setPixelOwner(x, y, acc.username, acc.emoji || '👾', getAvatarUrl(acc));
           pixelBatchBuffer.push({ x, y, c: colorIdx });
           isDirty = true;
           if (tl) tl.recordPixel(x, y, colorIdx);
@@ -1263,6 +1276,7 @@ initDatabases().then(async () => {
                 acc = {
                   username,
                   discord_id:     discordUser.id,
+                  discord_avatar: discordUser.avatar || '',
                   password:       null,
                   email:          discordUser.email || '',
                   role:           'user',
@@ -1283,10 +1297,17 @@ initDatabases().then(async () => {
                   dm_reads:            {},
                 };
                 await dbSaveAccount(username, acc);
-              } else if (!acc.discord_id) {
-                // Привязываем discord_id к существующему аккаунту
-                acc.discord_id = discordUser.id;
-                await dbSaveAccount(username, { discord_id: discordUser.id });
+              } else {
+                // Привязываем discord_id (если ещё не привязан) и всегда
+                // обновляем avatar hash — в Discord пользователь мог сменить
+                // аватарку с прошлого захода.
+                const patch = {};
+                if (!acc.discord_id) patch.discord_id = discordUser.id;
+                if (acc.discord_avatar !== (discordUser.avatar || '')) patch.discord_avatar = discordUser.avatar || '';
+                if (Object.keys(patch).length) {
+                  Object.assign(acc, patch);
+                  await dbSaveAccount(username, patch);
+                }
               }
 
               if (acc.banned) {
@@ -1316,6 +1337,7 @@ initDatabases().then(async () => {
                 pixels:          ws.userData.pixels    || 0,
                 rank:            ws.userData.rank      || 'Новичок',
                 emoji:           ws.userData.emoji     || '👾',
+                avatar:          getAvatarUrl(ws.userData),
                 coins:           ws.userData.coins     || 0,
                 clan:            ws.userData.clan      || '',
                 purchased_items: clientItems,
@@ -1388,6 +1410,7 @@ initDatabases().then(async () => {
             pixels:    ws.userData.pixels    || 0,
             rank:      ws.userData.rank      || 'Новичок',
             emoji:     ws.userData.emoji     || '👾',
+            avatar:    getAvatarUrl(ws.userData),
             coins:     ws.userData.coins     || 0,
             clan:      ws.userData.clan      || '',
             purchased_items: clientItems,
@@ -1434,7 +1457,7 @@ initDatabases().then(async () => {
         else if (action === 'get_leaderboard') {
           const allAccs  = await dbGetAllAccounts();
           const players  = allAccs
-            .map(a => ({ username: a.username, pixels: a.pixels||0, emoji: a.emoji||'👾', rank: a.rank||'Новичок' }))
+            .map(a => ({ username: a.username, pixels: a.pixels||0, emoji: a.emoji||'👾', avatar: getAvatarUrl(a), rank: a.rank||'Новичок' }))
             .sort((a, b) => b.pixels - a.pixels).slice(0, 30);
           const allClans = await dbGetAllClans();
           const clanTop  = allClans
@@ -1448,7 +1471,7 @@ initDatabases().then(async () => {
         else if (action === 'cursor') {
           if (!ws.isAuthorized) return;
           if (!serverSettings.cursorTrackingEnabled && !(ws.userData.clan && data.clan_only)) return;
-          const msg = JSON.stringify({ action:'cursor', u:ws.userData.username, x:data.x, y:data.y, c:data.c, emoji:ws.userData.emoji||'👾', clan:ws.userData.clan||'' });
+          const msg = JSON.stringify({ action:'cursor', u:ws.userData.username, x:data.x, y:data.y, c:data.c, emoji:ws.userData.emoji||'👾', avatar:getAvatarUrl(ws.userData), clan:ws.userData.clan||'' });
           if (data.clan_only && ws.userData.clan) broadcastToClan(ws.userData.clan, msg, ws);
           else wss.clients.forEach(c => { if (c !== ws && c.readyState === 1 && c.isAuthorized) c.send(msg); });
         }
@@ -1464,6 +1487,7 @@ initDatabases().then(async () => {
             y:        py,
             username: owner?.username || null,
             emoji:    owner?.emoji    || null,
+            avatar:   owner?.avatar   || null,
           }));
         }
 
@@ -1473,7 +1497,7 @@ initDatabases().then(async () => {
           await dbSaveAccount(ws.userData.username, { emoji: ws.userData.emoji });
           // Обновим emoji в таблице авторов пикселей
           const ownId = ownerIdMap.get(ws.userData.username);
-          if (ownId) ownerDataMap.set(ownId, { username: ws.userData.username, emoji: ws.userData.emoji });
+          if (ownId) ownerDataMap.set(ownId, { username: ws.userData.username, emoji: ws.userData.emoji, avatar: getAvatarUrl(ws.userData) });
           ws.send(JSON.stringify({ action:'toast', message:'Аватар сохранён!' }));
         }
 
@@ -1481,7 +1505,7 @@ initDatabases().then(async () => {
           if (!ws.isAuthorized) return;
           const text = (data.text || '').trim().slice(0, 200);
           if (!text) return;
-          const msg = { username: ws.userData.username, role: ws.userData.role || 'user', emoji: ws.userData.emoji || '👾', text, ts: Date.now() };
+          const msg = { username: ws.userData.username, role: ws.userData.role || 'user', emoji: ws.userData.emoji || '👾', avatar: getAvatarUrl(ws.userData), text, ts: Date.now() };
           globalChatHistory.push(msg);
           if (globalChatHistory.length > CHAT_HISTORY_LIMIT) globalChatHistory.shift();
           broadcastAll(JSON.stringify({ action: 'chat_message', msg }));
@@ -1491,7 +1515,7 @@ initDatabases().then(async () => {
           if (!ws.isAuthorized || !ws.userData.clan) return;
           const text = (data.text || '').trim().slice(0, 200);
           if (!text) return;
-          const msg = { username: ws.userData.username, emoji: ws.userData.emoji||'👾', text, ts: Date.now() };
+          const msg = { username: ws.userData.username, emoji: ws.userData.emoji||'👾', avatar: getAvatarUrl(ws.userData), text, ts: Date.now() };
           broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_chat_message', msg }), null);
         }
 
@@ -2159,7 +2183,7 @@ initDatabases().then(async () => {
             ws.send(JSON.stringify({ action:'toast', message:`В клане уже есть трафарет от ${existing.owner}. Попросите снять его или подождите.` }));
             return;
           }
-          const sharedStencil = { owner: ws.userData.username, emoji: ws.userData.emoji || '👾', stencil: data.stencil };
+          const sharedStencil = { owner: ws.userData.username, emoji: ws.userData.emoji || '👾', avatar: getAvatarUrl(ws.userData), stencil: data.stencil };
           await dbSaveClan(ws.userData.clan, { active_stencil: data.stencil, shared_stencil: sharedStencil });
           // Уведомляем всех (включая отправителя) — у всех обновляется единый трафарет клана.
           broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_stencil_update', stencil: sharedStencil, from: ws.userData.username }), null);
