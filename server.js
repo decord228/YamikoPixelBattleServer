@@ -83,28 +83,28 @@ function getAvatarUrl(acc) {
 //                     кода (правило №5 плана).
 const PROFILE_BANNERS_BUILTIN = [
   { id:'banner_none',    tier:'free', name:'Без баннера',   cost:0, css:null },
-  { id:'banner_c_white', tier:'free', name:'Белый',         cost:0, css:'#e4e4e4' },
-  { id:'banner_c_slate', tier:'free', name:'Графит',        cost:0, css:'#3a3a3a' },
-  { id:'banner_c_black', tier:'free', name:'Чёрный',        cost:0, css:'#1a1a1a' },
-  { id:'banner_c_red',   tier:'free', name:'Красный',       cost:0, css:'#e40000' },
-  { id:'banner_c_orange',tier:'free', name:'Оранжевый',     cost:0, css:'#ff9600' },
-  { id:'banner_c_yellow',tier:'free', name:'Жёлтый',        cost:0, css:'#ffd635' },
-  { id:'banner_c_green', tier:'free', name:'Зелёный',       cost:0, css:'#00a368' },
-  { id:'banner_c_teal',  tier:'free', name:'Бирюзовый',     cost:0, css:'#009eaa' },
-  { id:'banner_c_blue',  tier:'free', name:'Синий',         cost:0, css:'#2450a4' },
-  { id:'banner_c_indigo',tier:'free', name:'Индиго',        cost:0, css:'#493ac1' },
-  { id:'banner_c_purple',tier:'free', name:'Пурпурный',     cost:0, css:'#811e9f' },
-  { id:'banner_c_pink',  tier:'free', name:'Розовый',       cost:0, css:'#ff6392' },
+  { id:'banner_c_white', tier:'free', name:'Белый',         cost:10, css:'#e4e4e4' },
+  { id:'banner_c_slate', tier:'free', name:'Графит',        cost:10, css:'#3a3a3a' },
+  { id:'banner_c_black', tier:'free', name:'Чёрный',        cost:10, css:'#1a1a1a' },
+  { id:'banner_c_red',   tier:'free', name:'Красный',       cost:10, css:'#e40000' },
+  { id:'banner_c_orange',tier:'free', name:'Оранжевый',     cost:10, css:'#ff9600' },
+  { id:'banner_c_yellow',tier:'free', name:'Жёлтый',        cost:10, css:'#ffd635' },
+  { id:'banner_c_green', tier:'free', name:'Зелёный',       cost:10, css:'#00a368' },
+  { id:'banner_c_teal',  tier:'free', name:'Бирюзовый',     cost:10, css:'#009eaa' },
+  { id:'banner_c_blue',  tier:'free', name:'Синий',         cost:10, css:'#2450a4' },
+  { id:'banner_c_indigo',tier:'free', name:'Индиго',        cost:10, css:'#493ac1' },
+  { id:'banner_c_purple',tier:'free', name:'Пурпурный',     cost:10, css:'#811e9f' },
+  { id:'banner_c_pink',  tier:'free', name:'Розовый',       cost:10, css:'#ff6392' },
 
-  { id:'banner_sunset',  tier:'gradient', name:'Закат',    cost:10, css:'linear-gradient(135deg,#ff9600,#d40078)' },
-  { id:'banner_ocean',   tier:'gradient', name:'Океан',    cost:10, css:'linear-gradient(135deg,#00756f,#2450a4)' },
-  { id:'banner_forest',  tier:'gradient', name:'Лес',      cost:10, css:'linear-gradient(135deg,#006030,#7eed56)' },
-  { id:'banner_royal',   tier:'gradient', name:'Аметист',  cost:10, css:'linear-gradient(135deg,#493ac1,#b44ac0)' },
-  { id:'banner_flame',   tier:'gradient', name:'Пламя',    cost:10, css:'linear-gradient(135deg,#8a0022,#ff9600)' },
-  { id:'banner_mint',    tier:'gradient', name:'Мята',     cost:10, css:'linear-gradient(135deg,#00a368,#51e9f4)' },
-  { id:'banner_candy',   tier:'gradient', name:'Малина',   cost:10, css:'linear-gradient(135deg,#d40078,#ff99aa)' },
-  { id:'banner_slate_g', tier:'gradient', name:'Графит',   cost:10, css:'linear-gradient(135deg,#1a1a1a,#3a3a3a)' },
-  { id:'banner_indigo_g',tier:'gradient', name:'Индиго',   cost:10, css:'linear-gradient(135deg,#1d2b53,#493ac1)' },
+  { id:'banner_sunset',  tier:'gradient', name:'Закат',    cost:30, css:'linear-gradient(135deg,#ff9600,#d40078)' },
+  { id:'banner_ocean',   tier:'gradient', name:'Океан',    cost:30, css:'linear-gradient(135deg,#00756f,#2450a4)' },
+  { id:'banner_forest',  tier:'gradient', name:'Лес',      cost:30, css:'linear-gradient(135deg,#006030,#7eed56)' },
+  { id:'banner_royal',   tier:'gradient', name:'Аметист',  cost:30, css:'linear-gradient(135deg,#493ac1,#b44ac0)' },
+  { id:'banner_flame',   tier:'gradient', name:'Пламя',    cost:30, css:'linear-gradient(135deg,#8a0022,#ff9600)' },
+  { id:'banner_mint',    tier:'gradient', name:'Мята',     cost:30, css:'linear-gradient(135deg,#00a368,#51e9f4)' },
+  { id:'banner_candy',   tier:'gradient', name:'Малина',   cost:30, css:'linear-gradient(135deg,#d40078,#ff99aa)' },
+  { id:'banner_slate_g', tier:'gradient', name:'Графит',   cost:30, css:'linear-gradient(135deg,#1a1a1a,#3a3a3a)' },
+  { id:'banner_indigo_g',tier:'gradient', name:'Индиго',   cost:30, css:'linear-gradient(135deg,#1d2b53,#493ac1)' },
 ];
 
 // Встроенные анимированные баннеры (CSS keyframes, см. .pbanner-anim-* в
@@ -112,7 +112,7 @@ const PROFILE_BANNERS_BUILTIN = [
 // с анимацией, `css` — фон под ней (градиент/цвет, участвует в кадрах).
 // Цена растёт по числу "слоёв"/сложности анимации, как просил заказчик.
 const PROFILE_BANNERS_ANIMATED_CSS = [
-  { id:'banner_a_pulse',    tier:'animated', name:'Пульс',        cost:100,  anim:'pbanner-anim-pulse',    css:'linear-gradient(135deg,#493ac1,#3690ea)' },
+  { id:'banner_a_pulse',    tier:'animated', name:'Пульс',        cost:200,  anim:'pbanner-anim-pulse',    css:'linear-gradient(135deg,#493ac1,#3690ea)' },
   { id:'banner_a_tide',     tier:'animated', name:'Прилив',       cost:250,  anim:'pbanner-anim-tide',     css:'linear-gradient(120deg,#00756f,#2450a4,#00756f)' },
   { id:'banner_a_aurora',   tier:'animated', name:'Аврора',       cost:450,  anim:'pbanner-anim-aurora',   css:'linear-gradient(120deg,#006030,#493ac1,#d40078,#006030)' },
   { id:'banner_a_stardust', tier:'animated', name:'Звёздная пыль',cost:700,  anim:'pbanner-anim-stardust', css:'linear-gradient(135deg,#0a0a14,#1d2b53)' },
@@ -128,9 +128,9 @@ const PROFILE_BANNERS_ANIMATED_CSS = [
 // gradient вместо background-position анимации) — см. .pbanner-geo-* в
 // style.css. Цены по той же логике сложности/красоты (100–1000).
 const PROFILE_BANNERS_GEOMETRIC = [
-  { id:'banner_g_hex',      tier:'animated', name:'Соты',             cost:150, anim:'pbanner-geo-hex',      css:'#1a1a2e' },
+  { id:'banner_g_hex',      tier:'animated', name:'Соты',             cost:200, anim:'pbanner-geo-hex',      css:'#1a1a2e' },
   { id:'banner_g_triangle', tier:'animated', name:'Триангуляция',     cost:250, anim:'pbanner-geo-triangle', css:'#1d2b53' },
-  { id:'banner_g_stripes',  tier:'animated', name:'Диагонали',        cost:150, anim:'pbanner-geo-stripes',  css:'#2b1e3e' },
+  { id:'banner_g_stripes',  tier:'animated', name:'Диагонали',        cost:200, anim:'pbanner-geo-stripes',  css:'#2b1e3e' },
   { id:'banner_g_rings',    tier:'animated', name:'Радар',            cost:350, anim:'pbanner-geo-rings',    css:'#0a0a14' },
   { id:'banner_g_dots',     tier:'animated', name:'Пиксельная сетка', cost:200, anim:'pbanner-geo-dots',     css:'#1a1a1a' },
   { id:'banner_g_bolt',     tier:'animated', name:'Молния',           cost:400, anim:'pbanner-geo-bolt',     css:'#1d2b53' },
@@ -1718,7 +1718,13 @@ initDatabases().then(async () => {
           let clanInfo = null;
           if (acc.clan) {
             const c = await dbGetClan(acc.clan);
-            if (c) clanInfo = { name: c.name, tag: c.tag || '', icon: c.icon || '🏴', tag_color: c.tag_color || '#818cf8' };
+            if (c) clanInfo = {
+              name: c.name, tag: c.tag || '', icon: c.icon || '🏴', tag_color: c.tag_color || '#818cf8',
+              banner_url: c.banner_url || null,
+              banner_crop_x: c.banner_crop_x ?? 0, banner_crop_y: c.banner_crop_y ?? 0,
+              banner_crop_w: c.banner_crop_w ?? 1, banner_crop_h: c.banner_crop_h ?? 1,
+              members: (c.members || []).length, pixels: c.pixels || 0,
+            };
           }
           ws.send(JSON.stringify({
             action: 'profile_data',
@@ -2478,7 +2484,12 @@ initDatabases().then(async () => {
           } else {
             const banner = getBannerById(bannerId);
             if (!banner) { ws.send(JSON.stringify({ action:'toast', message:'Баннер не найден' })); return; }
-            const owned = banner.tier === 'free' || (ws.userData.owned_banners || []).includes(bannerId);
+            // Раньше тут проверялось banner.tier === 'free', что было верно,
+            // пока цветные баннеры (tier:'free') действительно стоили 0
+            // монет. Теперь у них тоже есть цена (см. PROFILE_BANNERS_BUILTIN),
+            // поэтому "бесплатным" считаем только баннер с cost===0 (это
+            // остаётся верным и для 'banner_none'), а не весь tier целиком.
+            const owned = banner.cost === 0 || (ws.userData.owned_banners || []).includes(bannerId);
             if (!owned) { ws.send(JSON.stringify({ action:'toast', message:'Этот баннер ещё не куплен' })); return; }
           }
 
@@ -2493,7 +2504,7 @@ initDatabases().then(async () => {
           const bannerId = data.banner_id;
           const banner = getBannerById(bannerId);
           if (!banner) { ws.send(JSON.stringify({ action:'toast', message:'Баннер не найден' })); return; }
-          if (banner.tier === 'free') { ws.send(JSON.stringify({ action:'toast', message:'Этот баннер и так бесплатный — просто выберите его' })); return; }
+          if (banner.cost === 0) { ws.send(JSON.stringify({ action:'toast', message:'Этот баннер и так бесплатный — просто выберите его' })); return; }
 
           const acc = await dbGetAccount(ws.userData.username);
           const owned = acc.owned_banners || [];
