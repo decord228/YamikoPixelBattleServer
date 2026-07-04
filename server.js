@@ -2478,6 +2478,15 @@ initDatabases().then(async () => {
           const target = data.name || ws.userData.clan;
           if (target) {
             const clan = await dbGetClan(target);
+            // Если это была ссылка на СОБСТВЕННЫЙ клан игрока, а клан больше
+            // не существует (документ пропал из БД, например из-за бага
+            // переименования) — самоисцеляемся: снимаем "подвешенное"
+            // членство, чтобы игрок не оставался вечно привязан к призраку
+            // и мог свободно вступить в другой клан / создать новый.
+            if (!clan && target === ws.userData.clan) {
+              ws.userData.clan = '';
+              await dbSaveAccount(ws.userData.username, { clan: '' });
+            }
             ws.send(JSON.stringify({ action:'clan_data', clan }));
           }
         }
