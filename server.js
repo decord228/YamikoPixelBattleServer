@@ -486,11 +486,14 @@ async function dbGetAccountByDiscordId(discordId) {
 // Полная карточка игрока для панели управления в новой админке (ui.js:
 // openAdminUserProfile). Собирает всё, что можно редактировать или полезно
 // увидеть в одном месте, без отдельных запросов по каждому полю.
-async function buildAdminUserDetail(username) {
+// ВАЖНО: эта функция объявлена в модульной области видимости, а `wss`
+// создаётся как const внутри отдельной функции запуска сервера — обращение
+// к wss здесь привело бы к ReferenceError и "тихому" падению обработчика
+// (клиент до бесконечности видел "Загрузка..."). Поэтому статус "онлайн"
+// передаётся снаружи, из места вызова, где wss уже доступна.
+async function buildAdminUserDetail(username, online = false) {
   const acc = await dbGetAccount(username);
   if (!acc) return null;
-  let online = false;
-  wss.clients.forEach(c => { if (c.isAuthorized && c.userData?.username === username) online = true; });
   return {
     username:      acc.username,
     role:          acc.role || 'user',
@@ -2704,7 +2707,9 @@ initDatabases().then(async () => {
                 }
               });
               ws.send(JSON.stringify({ action:'toast', message:`${data.target}: монеты → ${newCoins}` }));
-              ws.send(JSON.stringify({ action:'admin_user_detail', user: await buildAdminUserDetail(data.target) }));
+              let __online = false;
+              wss.clients.forEach(c => { if (c.isAuthorized && c.userData?.username === data.target) __online = true; });
+              ws.send(JSON.stringify({ action:'admin_user_detail', user: await buildAdminUserDetail(data.target, __online) }));
             }
           }
 
@@ -2723,15 +2728,24 @@ initDatabases().then(async () => {
                 }
               });
               ws.send(JSON.stringify({ action:'toast', message:`${data.target}: пиксели → ${newPixels}` }));
-              ws.send(JSON.stringify({ action:'admin_user_detail', user: await buildAdminUserDetail(data.target) }));
+              let __online2 = false;
+              wss.clients.forEach(c => { if (c.isAuthorized && c.userData?.username === data.target) __online2 = true; });
+              ws.send(JSON.stringify({ action:'admin_user_detail', user: await buildAdminUserDetail(data.target, __online2) }));
             }
           }
 
           // Полная карточка игрока для панели управления в админке.
           else if (cmd === 'get_user_detail') {
-            const detail = await buildAdminUserDetail(data.target);
-            if (!detail) { ws.send(JSON.stringify({ action:'toast', message:'Игрок не найден' })); return; }
-            ws.send(JSON.stringify({ action:'admin_user_detail', user: detail }));
+            try {
+              let online = false;
+              wss.clients.forEach(c => { if (c.isAuthorized && c.userData?.username === data.target) online = true; });
+              const detail = await buildAdminUserDetail(data.target, online);
+              if (!detail) { ws.send(JSON.stringify({ action:'toast', message:'Игрок не найден' })); return; }
+              ws.send(JSON.stringify({ action:'admin_user_detail', user: detail }));
+            } catch (e) {
+              console.error('❌ get_user_detail:', e.message);
+              ws.send(JSON.stringify({ action:'toast', message:'Ошибка загрузки карточки игрока: ' + e.message }));
+            }
           }
 
           // Принудительно разрывает текущую сессию игрока (не бан — просто кик).
