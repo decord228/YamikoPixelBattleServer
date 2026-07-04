@@ -226,8 +226,29 @@ function getPixelOwner(x, y) {
 let serverSettings = {
   cursorTrackingEnabled: false,
   cooldownMs: 3000,
-  globalStencil: null
+  globalStencil: null,
+  // ── ЛОКАУТ (глобальное закрытие Пиксель Батла) ──
+  lockdown: { active: false, until: 0, message: '' },
+  // ── РЕКЛАМА ──
+  ads: { active: false, type: 'banner', imageUrl: '', link: '', intervalMinutes: 5 }
 };
+
+// Проверяет, закрыт ли Пиксель Батл прямо сейчас. Если время истекло —
+// автоматически снимает блокировку и рассылает обновлённые настройки
+// ВСЕМ клиентам, чтобы экран блокировки исчез ровно в момент истечения
+// таймера, даже у тех, кто ничего не делает (не пытается ставить пиксели).
+function isLockedNow() {
+  const l = serverSettings.lockdown;
+  if (!l || !l.active) return false;
+  if (l.until && Date.now() >= l.until) {
+    l.active = false;
+    saveSettings();
+    broadcastAll(JSON.stringify({ action: 'server_settings', settings: serverSettings }));
+    return false;
+  }
+  return true;
+}
+setInterval(() => { try { isLockedNow(); } catch(e) {} }, 3000);
 
 // ── IN-MEMORY STORES ───────────────────────────────────────
 let accounts  = {};
@@ -1372,6 +1393,9 @@ initDatabases().then(async () => {
         if (acc.timeout_until > Date.now()) {
           const left = Math.ceil((acc.timeout_until - Date.now()) / 1000);
           ws.send(JSON.stringify({ action:'toast', message:`Таймаут! Осталось: ${left}с` })); return;
+        }
+        if (isLockedNow() && acc.role !== 'admin') {
+          ws.send(JSON.stringify({ action:'toast', message:'🔒 Пиксель Батл временно закрыт' })); return;
         }
 
         const x       = (message[0] << 8) | message[1];
@@ -2954,6 +2978,32 @@ initDatabases().then(async () => {
               canvas_h:     CANVAS_HEIGHT,
               cooldown_ms:  serverSettings.cooldownMs,
             }));
+          }
+
+          else if (cmd === 'lockdown_set') {
+            const p = data.params || {};
+            serverSettings.lockdown = {
+              active:  !!p.active,
+              until:   p.active ? Number(p.until) || 0 : 0,
+              message: String(p.message || '').slice(0, 300),
+            };
+            await saveSettings();
+            broadcastAll(JSON.stringify({ action: 'server_settings', settings: serverSettings }));
+            ws.send(JSON.stringify({ action:'toast', message: serverSettings.lockdown.active ? '🔒 Пиксель Батл закрыт' : '🔓 Пиксель Батл открыт' }));
+          }
+
+          else if (cmd === 'ads_set') {
+            const p = data.params || {};
+            serverSettings.ads = {
+              active:          !!p.active,
+              type:            p.type === 'popup' ? 'popup' : 'banner',
+              imageUrl:        String(p.imageUrl || ''),
+              link:            String(p.link || ''),
+              intervalMinutes: Math.max(1, Math.min(1440, parseInt(p.intervalMinutes) || 5)),
+            };
+            await saveSettings();
+            broadcastAll(JSON.stringify({ action: 'server_settings', settings: serverSettings }));
+            ws.send(JSON.stringify({ action:'toast', message: 'Настройки рекламы сохранены' }));
           }
 
           else if (cmd === 'news_create') {
