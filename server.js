@@ -128,9 +128,9 @@ const PROFILE_BANNERS_ANIMATED_CSS = [
 // gradient вместо background-position анимации) — см. .pbanner-geo-* в
 // style.css. Цены по той же логике сложности/красоты (100–1000).
 const PROFILE_BANNERS_GEOMETRIC = [
-  { id:'banner_g_hex',      tier:'animated', name:'Соты',             cost:400, anim:'pbanner-geo-hex',      css:'linear-gradient(90deg,#1a1015,#6a2a10,#2b1e3e,#1d2b53,#1a1015)' },
+  { id:'banner_g_hex',      tier:'animated', name:'Соты',             cost:350, anim:'pbanner-geo-hex',      css:'linear-gradient(120deg,#050308,#12081f,#2b1030,#12081f,#050308)' },
   { id:'banner_g_triangle', tier:'animated', name:'Триангуляция',     cost:250, anim:'pbanner-geo-triangle', css:'#1d2b53' },
-  { id:'banner_g_stripes',  tier:'animated', name:'Диагонали',        cost:250, anim:'pbanner-geo-stripes',  css:'linear-gradient(135deg,#1a1a2e,#2b1e3e,#1a1a2e)' },
+  { id:'banner_g_stripes',  tier:'animated', name:'Диагонали',        cost:200, anim:'pbanner-geo-stripes',  css:'#2b1e3e' },
   { id:'banner_g_rings',    tier:'animated', name:'Радар',            cost:350, anim:'pbanner-geo-rings',    css:'#0a0a14' },
   { id:'banner_g_dots',     tier:'animated', name:'Пиксельная сетка', cost:200, anim:'pbanner-geo-dots',     css:'#1a1a1a' },
   { id:'banner_g_bolt',     tier:'animated', name:'Молния',           cost:400, anim:'pbanner-geo-bolt',     css:'#1d2b53' },
