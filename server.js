@@ -2828,15 +2828,20 @@ initDatabases().then(async () => {
           }
 
           // ── АДМИН: редактирование клана (название/тег/описание) — для модерации ──
-          // ── АДМИН: восстановление списка участников клана из аккаунтов ──
-          // Аварийная команда на случай, если clan.members опустел (например,
-          // из-за бага в переименовании клана выше), а у самих пользователей
-          // поле account.clan осталось верным. Собирает членов заново по факту
-          // "чей account.clan указывает на этот клан", не трогая остальные поля.
+          // ── АДМИН: восстановление клана из аккаунтов ──
+          // Аварийная команда на случай, если clan.members опустел или клан
+          // пропал совсем (см. баг в переименовании выше), а у самих
+          // пользователей поле account.clan осталось верным. Собирает членов
+          // заново по факту "чей account.clan указывает на этот клан".
+          // Если документа клана в БД больше нет вообще — создаёт его заново
+          // с нуля (лидером станет один из найденных участников; звания,
+          // казну, статистику пикселей клана и настройки восстановить
+          // невозможно — этих данных больше нигде не осталось).
           else if (cmd === 'rebuild_clan_members') {
             const name = data.params?.name || data.params;
-            const clan = await dbGetClan(name);
-            if (!clan) { ws.send(JSON.stringify({ action:'toast', message:'Клан не найден' })); return; }
+            if (!name) { ws.send(JSON.stringify({ action:'toast', message:'Не указано имя клана' })); return; }
+
+            let clan = await dbGetClan(name);
 
             const allAccs = await dbGetAllAccounts();
             const rebuiltMembers = allAccs.filter(a => a.clan === name).map(a => a.username);
@@ -2845,12 +2850,34 @@ initDatabases().then(async () => {
               ws.send(JSON.stringify({ action:'toast', message:'Не найдено ни одного аккаунта с clan=' + name, type:'error' }));
               return;
             }
-            // Лидер обязан присутствовать в списке, иначе clanRankOf будет спотыкаться.
-            if (clan.leader && !rebuiltMembers.includes(clan.leader)) rebuiltMembers.push(clan.leader);
 
-            await dbSaveClan(name, { members: rebuiltMembers });
+            if (!clan) {
+              // Документа нет вообще — единственное, что у нас осталось, это
+              // список участников. Пересоздаём минимальный клан вокруг него.
+              const leader = (data.params?.leader && rebuiltMembers.includes(data.params.leader))
+                ? data.params.leader
+                : rebuiltMembers[0];
+              await dbSaveClan(name, {
+                name, leader, members: rebuiltMembers,
+                tag: (data.params?.tag || name.replace(/[^A-Za-zА-Яа-я0-9]/g,'').slice(0,4).toUpperCase() || 'CLAN'),
+                description: '', icon: '🏴', tag_color: '#818cf8',
+                join_type: 'open', min_pixels: 0, is_public: true, share_cursor: false,
+                pixels: 0, treasury: 0, ranks: null, member_roles: {},
+              });
+              clan = await dbGetClan(name);
+              ws.send(JSON.stringify({
+                action: 'toast', type: 'success',
+                message: `Клан "${name}" пересоздан с нуля. Лидер: ${leader}. Участников: ${rebuiltMembers.length} (${rebuiltMembers.join(', ')}). ⚠️ Казна, звания, счётчик пикселей клана и настройки безвозвратно утеряны — их придётся настроить заново.`,
+              }));
+            } else {
+              // Документ есть, но список участников пуст/неполный — просто
+              // дополняем/перезаписываем members, остальные поля не трогаем.
+              if (clan.leader && !rebuiltMembers.includes(clan.leader)) rebuiltMembers.push(clan.leader);
+              await dbSaveClan(name, { members: rebuiltMembers });
+              ws.send(JSON.stringify({ action:'toast', type:'success', message:`Восстановлено участников: ${rebuiltMembers.length} (${rebuiltMembers.join(', ')})` }));
+            }
+
             broadcastToClan(name, JSON.stringify({ action:'clan_data', clan: await dbGetClan(name) }), null);
-            ws.send(JSON.stringify({ action:'toast', message:`Восстановлено участников: ${rebuiltMembers.length} (${rebuiltMembers.join(', ')})`, type:'success' }));
           }
 
           else if (cmd === 'edit_clan') {
