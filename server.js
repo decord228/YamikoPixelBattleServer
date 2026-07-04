@@ -128,12 +128,29 @@ const PROFILE_BANNERS_ANIMATED_CSS = [
 // gradient вместо background-position анимации) — см. .pbanner-geo-* в
 // style.css. Цены по той же логике сложности/красоты (100–1000).
 const PROFILE_BANNERS_GEOMETRIC = [
-  { id:'banner_g_hex',      tier:'animated', name:'Соты',             cost:200, anim:'pbanner-geo-hex',      css:'#1a1a2e' },
+  { id:'banner_g_hex',      tier:'animated', name:'Соты',             cost:350, anim:'pbanner-geo-hex',      css:'linear-gradient(120deg,#1a0f2e,#5a1030,#ff9600,#d4227e,#1a0f2e)' },
   { id:'banner_g_triangle', tier:'animated', name:'Триангуляция',     cost:250, anim:'pbanner-geo-triangle', css:'#1d2b53' },
   { id:'banner_g_stripes',  tier:'animated', name:'Диагонали',        cost:200, anim:'pbanner-geo-stripes',  css:'#2b1e3e' },
   { id:'banner_g_rings',    tier:'animated', name:'Радар',            cost:350, anim:'pbanner-geo-rings',    css:'#0a0a14' },
   { id:'banner_g_dots',     tier:'animated', name:'Пиксельная сетка', cost:200, anim:'pbanner-geo-dots',     css:'#1a1a1a' },
   { id:'banner_g_bolt',     tier:'animated', name:'Молния',           cost:400, anim:'pbanner-geo-bolt',     css:'#1d2b53' },
+];
+
+// ── ПРЕМИУМ-БАННЕРЫ (Этап 3, доп. заказ: "больше сложности, шедевры") ──
+// Каждый — минимум два независимых слоя анимации (см. .pbanner-prem-* в
+// style.css), а не один плоский градиент/паттерн. Космос/звёзды/аниме/
+// пастельная эстетика ("пикми") — как просил заказчик. Цены — по
+// визуальной сложности (350 — простейшие частицы, 950 — самые многослойные).
+const PROFILE_BANNERS_PREMIUM = [
+  { id:'banner_p_starfield',     tier:'animated', name:'Звёздное небо',   cost:450, anim:'pbanner-prem-starfield',     css:'linear-gradient(160deg,#05050f,#1d2b53,#05050f)' },
+  { id:'banner_p_galaxy',        tier:'animated', name:'Галактика',       cost:900, anim:'pbanner-prem-galaxy',        css:'radial-gradient(circle at 50% 50%,#1d0f30,#05050a 70%)' },
+  { id:'banner_p_sakura',        tier:'animated', name:'Сакура',          cost:500, anim:'pbanner-prem-sakura',        css:'linear-gradient(160deg,#ffd6e8,#ff9ec4,#6a3a7a)' },
+  { id:'banner_p_pikmi',         tier:'animated', name:'Пикми',           cost:400, anim:'pbanner-prem-pikmi',         css:'linear-gradient(135deg,#ffd6f0,#c8b6ff,#b6f0ff,#ffe9b6)' },
+  { id:'banner_p_matrix',        tier:'animated', name:'Матрица',         cost:450, anim:'pbanner-prem-matrix',        css:'#040a04' },
+  { id:'banner_p_supernova',     tier:'animated', name:'Сверхновая',      cost:700, anim:'pbanner-prem-supernova',     css:'radial-gradient(circle at 50% 50%,#2b1000,#05050a 75%)' },
+  { id:'banner_p_lava',          tier:'animated', name:'Лава',            cost:550, anim:'pbanner-prem-lava',          css:'linear-gradient(160deg,#1a0505,#3a0a0a)' },
+  { id:'banner_p_ocean_deep',    tier:'animated', name:'Глубина океана',  cost:600, anim:'pbanner-prem-ocean',         css:'linear-gradient(180deg,#00343a,#001a20)' },
+  { id:'banner_p_constellation', tier:'animated', name:'Созвездие',       cost:950, anim:'pbanner-prem-constellation', css:'linear-gradient(160deg,#05050f,#0d1230,#05050f)' },
 ];
 
 const BANNERS_DIR          = path.join(__dirname, 'resources', 'banners');
@@ -171,7 +188,7 @@ function loadAnimatedBanners() {
 // Считаем один раз при старте процесса — если админ добавит баннер в манифест
 // без релога сервера, он появится после следующего рестарта/деплоя (то же
 // поведение, что и у остального статического конфига проекта).
-const PROFILE_BANNERS = PROFILE_BANNERS_BUILTIN.concat(PROFILE_BANNERS_ANIMATED_CSS, PROFILE_BANNERS_GEOMETRIC, loadAnimatedBanners());
+const PROFILE_BANNERS = PROFILE_BANNERS_BUILTIN.concat(PROFILE_BANNERS_ANIMATED_CSS, PROFILE_BANNERS_GEOMETRIC, PROFILE_BANNERS_PREMIUM, loadAnimatedBanners());
 
 function getBannerById(id) {
   if (!id) return null;
