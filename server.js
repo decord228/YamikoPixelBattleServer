@@ -2828,6 +2828,31 @@ initDatabases().then(async () => {
           }
 
           // ── АДМИН: редактирование клана (название/тег/описание) — для модерации ──
+          // ── АДМИН: восстановление списка участников клана из аккаунтов ──
+          // Аварийная команда на случай, если clan.members опустел (например,
+          // из-за бага в переименовании клана выше), а у самих пользователей
+          // поле account.clan осталось верным. Собирает членов заново по факту
+          // "чей account.clan указывает на этот клан", не трогая остальные поля.
+          else if (cmd === 'rebuild_clan_members') {
+            const name = data.params?.name || data.params;
+            const clan = await dbGetClan(name);
+            if (!clan) { ws.send(JSON.stringify({ action:'toast', message:'Клан не найден' })); return; }
+
+            const allAccs = await dbGetAllAccounts();
+            const rebuiltMembers = allAccs.filter(a => a.clan === name).map(a => a.username);
+
+            if (!rebuiltMembers.length) {
+              ws.send(JSON.stringify({ action:'toast', message:'Не найдено ни одного аккаунта с clan=' + name, type:'error' }));
+              return;
+            }
+            // Лидер обязан присутствовать в списке, иначе clanRankOf будет спотыкаться.
+            if (clan.leader && !rebuiltMembers.includes(clan.leader)) rebuiltMembers.push(clan.leader);
+
+            await dbSaveClan(name, { members: rebuiltMembers });
+            broadcastToClan(name, JSON.stringify({ action:'clan_data', clan: await dbGetClan(name) }), null);
+            ws.send(JSON.stringify({ action:'toast', message:`Восстановлено участников: ${rebuiltMembers.length} (${rebuiltMembers.join(', ')})`, type:'success' }));
+          }
+
           else if (cmd === 'edit_clan') {
             const p = data.params || {};
             const name = p.name;
@@ -2845,8 +2870,32 @@ initDatabases().then(async () => {
               const clash = await dbGetClan(newName);
               if (clash) { ws.send(JSON.stringify({ action:'toast', message:`Клан «${newName}» уже существует` })); return; }
 
-              const merged = { ...clan, ...patch, name: newName };
+              // ВАЖНО: clan пришёл из dbGetClan() — это lean()-документ Mongo, в
+              // нём есть служебные _id/__v, а сам сервер ещё подмешивает
+              // вычисляемое поле member_cards. Если пронести _id в апсёрт
+              // нового документа (findOneAndUpdate(..., {upsert:true})), Mongo
+              // попытается создать новый документ со СТАРЫМ _id, который на
+              // этот момент ещё существует у документа под старым именем —
+              // получаем E11000 duplicate key. Ошибка молча логируется внутри
+              // dbSaveClan и проглатывается, поэтому апсёрт нового имени не
+              // происходит, а следом старый документ всё равно удаляется —
+              // клан фактически исчезает из БД (при этом в памяти процесса
+              // ещё какое-то время всё выглядит нормально, пока не случится
+              // рестарт/redeploy или следующий upsert с частичными данными,
+              // который создаёт "пустой" документ клана без участников).
+              const { _id, __v, member_cards, ...clanClean } = clan;
+              const merged = { ...clanClean, ...patch, name: newName };
+
+              // Порядок тоже важен: сначала убеждаемся, что новый документ
+              // реально сохранился, и только потом удаляем старый — чтобы при
+              // сбое записи не потерять единственную копию данных клана.
               await dbSaveClan(newName, merged);
+              const verify = await dbGetClan(newName);
+              if (!verify || (verify.members || []).length !== (clan.members || []).length) {
+                console.error(`❌ edit_clan: не удалось подтвердить перенос клана "${name}" → "${newName}", отменяю переименование`);
+                ws.send(JSON.stringify({ action:'toast', message:'Не удалось переименовать клан (ошибка сохранения), попробуйте ещё раз', type:'error' }));
+                return;
+              }
               await dbDeleteClan(name);
 
               const members = clan.members || [];
