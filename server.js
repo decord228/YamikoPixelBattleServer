@@ -483,6 +483,33 @@ async function dbGetAccountByDiscordId(discordId) {
   }
 }
 
+// Полная карточка игрока для панели управления в новой админке (ui.js:
+// openAdminUserProfile). Собирает всё, что можно редактировать или полезно
+// увидеть в одном месте, без отдельных запросов по каждому полю.
+async function buildAdminUserDetail(username) {
+  const acc = await dbGetAccount(username);
+  if (!acc) return null;
+  let online = false;
+  wss.clients.forEach(c => { if (c.isAuthorized && c.userData?.username === username) online = true; });
+  return {
+    username:      acc.username,
+    role:          acc.role || 'user',
+    banned:        acc.banned || false,
+    timeout_until: acc.timeout_until || 0,
+    pixels:        acc.pixels || 0,
+    coins:         acc.coins || 0,
+    clan:          acc.clan || '',
+    emoji:         acc.emoji || '👾',
+    avatar:        getAvatarUrl(acc),
+    rank:          acc.rank || getRank(acc.pixels || 0).name,
+    banner:        acc.banner_id || null,
+    owned_banners: acc.owned_banners || [],
+    inventory:     acc.inventory || {},
+    created_at:    acc.created_at || null,
+    online,
+  };
+}
+
 async function dbSaveAccount(username, data) {
   accounts[username] = { ...accounts[username], ...data };
   if (AccountModel) {
@@ -2599,6 +2626,10 @@ initDatabases().then(async () => {
               pixels:        a.pixels || 0,
               coins:         a.coins  || 0,
               clan:          a.clan   || '',
+              emoji:         a.emoji  || '👾',
+              avatar:        getAvatarUrl(a),
+              rank:          a.rank   || 'Новичок',
+              banner:        a.banner_id || null,
             }));
             const totalPages = Math.ceil(users.length / limit) || 1;
             const start      = (page - 1) * limit;
@@ -2657,6 +2688,63 @@ initDatabases().then(async () => {
               });
               ws.send(JSON.stringify({ action:'toast', message:`${data.target} получил ${amount} монет` }));
             }
+          }
+
+          // Абсолютная установка монет (в отличие от give_coins, который добавляет).
+          // Нужна для панели управления игроком в новой админке.
+          else if (cmd === 'set_coins') {
+            const newCoins = Math.max(0, parseInt(data.params) || 0);
+            const acc = await dbGetAccount(data.target);
+            if (acc) {
+              await dbSaveAccount(data.target, { coins: newCoins });
+              wss.clients.forEach(c => {
+                if (c.isAuthorized && c.userData?.username === data.target) {
+                  c.userData.coins = newCoins;
+                  c.send(JSON.stringify({ action:'coins_update', coins: newCoins, pixels: c.userData.pixels||0 }));
+                }
+              });
+              ws.send(JSON.stringify({ action:'toast', message:`${data.target}: монеты → ${newCoins}` }));
+              ws.send(JSON.stringify({ action:'admin_user_detail', user: await buildAdminUserDetail(data.target) }));
+            }
+          }
+
+          // Абсолютная установка пикселей (влияет на ранг игрока).
+          else if (cmd === 'set_pixels') {
+            const newPixels = Math.max(0, parseInt(data.params) || 0);
+            const acc = await dbGetAccount(data.target);
+            if (acc) {
+              const newRank = getRank(newPixels).name;
+              await dbSaveAccount(data.target, { pixels: newPixels, rank: newRank });
+              wss.clients.forEach(c => {
+                if (c.isAuthorized && c.userData?.username === data.target) {
+                  c.userData.pixels = newPixels;
+                  c.userData.rank = newRank;
+                  c.send(JSON.stringify({ action:'coins_update', coins: c.userData.coins||0, pixels: newPixels }));
+                }
+              });
+              ws.send(JSON.stringify({ action:'toast', message:`${data.target}: пиксели → ${newPixels}` }));
+              ws.send(JSON.stringify({ action:'admin_user_detail', user: await buildAdminUserDetail(data.target) }));
+            }
+          }
+
+          // Полная карточка игрока для панели управления в админке.
+          else if (cmd === 'get_user_detail') {
+            const detail = await buildAdminUserDetail(data.target);
+            if (!detail) { ws.send(JSON.stringify({ action:'toast', message:'Игрок не найден' })); return; }
+            ws.send(JSON.stringify({ action:'admin_user_detail', user: detail }));
+          }
+
+          // Принудительно разрывает текущую сессию игрока (не бан — просто кик).
+          else if (cmd === 'kick_session') {
+            let found = false;
+            wss.clients.forEach(c => {
+              if (c.isAuthorized && c.userData?.username === data.target) {
+                found = true;
+                c.send(JSON.stringify({ action:'toast', message:'Вы были отключены администратором.' }));
+                c.close();
+              }
+            });
+            ws.send(JSON.stringify({ action:'toast', message: found ? `${data.target} отключен` : `${data.target} не в сети` }));
           }
 
           else if (cmd === 'resize_canvas') {
