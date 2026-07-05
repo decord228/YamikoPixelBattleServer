@@ -306,7 +306,13 @@ const SHOP_ITEMS = [
   { id: 'rainbow_5x5',    title:'Радужный взрыв 5×5',      cost:80,  role:'vip',  type:'consumable' },
   { id: 'eraser_10x10',   title:'Большой Ластик 10×10',    cost:120, role:'vip',  type:'consumable' },
   { id: 'mirror_stamp',   title:'Зеркальный штамп',        cost:200, role:'vip',  type:'consumable' },
+  // Кулдаун-ускорители (в процентах, см. useConsumable → cooldown_boost)
+  { id: 'cooldown_boost_25', title:'Ускоритель −25%',    cost:60,  role:'vip', type:'consumable', pct:25, durationMin:15 },
+  { id: 'cooldown_boost_50', title:'Ускоритель −50%',    cost:130, role:'vip', type:'consumable', pct:50, durationMin:15 },
+  { id: 'cooldown_boost_90', title:'Турбо-режим −90%',   cost:220, role:'vip', type:'consumable', pct:90, durationMin:5  },
 ];
+
+const COOLDOWN_BOOST_IDS = { cooldown_boost_25:{pct:25,durationMin:15}, cooldown_boost_50:{pct:50,durationMin:15}, cooldown_boost_90:{pct:90,durationMin:5} };
 
 // ── DB TIMEOUT HELPER ──────────────────────────────────────
 const dbTimeout = (promise, ms = 4000) => Promise.race([
@@ -901,32 +907,67 @@ async function initDatabases() {
   if (!canvasLoaded) console.log('⚠️ Начат с чистого холста');
 
   // ── Загрузка авторов пикселей ──────────────────────────
-  try {
-    if (fs.existsSync(PIXEL_IDS_FILE)) {
-      const ids = JSON.parse(fs.readFileSync(PIXEL_IDS_FILE, 'utf8'));
-      let maxId = 0;
-      for (const entry of ids) {
-        ownerIdMap.set(entry.username, entry.id);
-        ownerDataMap.set(entry.id, { username: entry.username, emoji: entry.emoji || '👾', avatar: entry.avatar || null });
-        if (entry.id > maxId) maxId = entry.id;
+  // ВАЖНО: на хостингах вроде Render локальный диск эфемерный и обнуляется
+  // при каждом рестарте/редеплое — раньше эти данные хранились ТОЛЬКО в
+  // файлах (PIXEL_IDS_FILE/PIXEL_OWNERS_FILE), поэтому "последний автор
+  // пикселя" пропадал при каждом перезапуске, хотя сам холст выживал
+  // (он-то как раз лежит в Redis). Теперь тот же Uint16-буфер и словарь
+  // авторов зеркалируются в Redis — это всего ~2 байта на пиксель
+  // (для холста 256×256 — 128 КБ, для 512×512 — 512 КБ), что ничтожно
+  // мало относительно лимита Upstash в 256 МБ. Файлы остаются как
+  // локальный fallback/кэш на случай недоступности Redis.
+  let ownersLoaded = false;
+  if (redis) {
+    try {
+      const idsRaw = await redis.get('pixel_owner_ids');
+      const ownersB64 = await redis.get('pixel_owners');
+      if (idsRaw && ownersB64) {
+        const ids = typeof idsRaw === 'string' ? JSON.parse(idsRaw) : idsRaw;
+        let maxId = 0;
+        for (const entry of ids) {
+          ownerIdMap.set(entry.username, entry.id);
+          ownerDataMap.set(entry.id, { username: entry.username, emoji: entry.emoji || '👾', avatar: entry.avatar || null });
+          if (entry.id > maxId) maxId = entry.id;
+        }
+        nextOwnerId = maxId + 1;
+        const buf = Buffer.from(ownersB64, 'base64');
+        if (buf.length === CANVAS_SIZE * 2) {
+          pixelOwners.set(new Uint16Array(buf.buffer, buf.byteOffset, CANVAS_SIZE));
+          ownersLoaded = true;
+          console.log(`✅ Таблица авторов пикселей загружена из Redis (${ids.length} записей)`);
+        }
       }
-      nextOwnerId = maxId + 1;
-      console.log(`✅ Загружен словарь авторов (${ids.length} записей)`);
-    }
-  } catch(e) { console.error('❌ pixel_owner_ids.json:', e.message); }
+    } catch(e) { console.error('❌ Redis pixel owners:', e.message); }
+  }
 
-  try {
-    if (fs.existsSync(PIXEL_OWNERS_FILE)) {
-      const buf = fs.readFileSync(PIXEL_OWNERS_FILE);
-      // Файл хранит Uint16 little-endian, размер = CANVAS_SIZE * 2
-      if (buf.length === CANVAS_SIZE * 2) {
-        pixelOwners.set(new Uint16Array(buf.buffer, buf.byteOffset, CANVAS_SIZE));
-        console.log('✅ Загружена таблица авторов пикселей');
-      } else {
-        console.log('⚠️ pixel_owners.bin: неверный размер, начинаем заново');
+  if (!ownersLoaded) {
+    try {
+      if (fs.existsSync(PIXEL_IDS_FILE)) {
+        const ids = JSON.parse(fs.readFileSync(PIXEL_IDS_FILE, 'utf8'));
+        let maxId = 0;
+        for (const entry of ids) {
+          ownerIdMap.set(entry.username, entry.id);
+          ownerDataMap.set(entry.id, { username: entry.username, emoji: entry.emoji || '👾', avatar: entry.avatar || null });
+          if (entry.id > maxId) maxId = entry.id;
+        }
+        nextOwnerId = maxId + 1;
+        console.log(`✅ Загружен словарь авторов из файла (${ids.length} записей)`);
       }
-    }
-  } catch(e) { console.error('❌ pixel_owners.bin:', e.message); }
+    } catch(e) { console.error('❌ pixel_owner_ids.json:', e.message); }
+
+    try {
+      if (fs.existsSync(PIXEL_OWNERS_FILE)) {
+        const buf = fs.readFileSync(PIXEL_OWNERS_FILE);
+        // Файл хранит Uint16 little-endian, размер = CANVAS_SIZE * 2
+        if (buf.length === CANVAS_SIZE * 2) {
+          pixelOwners.set(new Uint16Array(buf.buffer, buf.byteOffset, CANVAS_SIZE));
+          console.log('✅ Загружена таблица авторов пикселей из файла');
+        } else {
+          console.log('⚠️ pixel_owners.bin: неверный размер, начинаем заново');
+        }
+      }
+    } catch(e) { console.error('❌ pixel_owners.bin:', e.message); }
+  }
 }
 
 // ── PERSIST ────────────────────────────────────────────────
@@ -943,19 +984,25 @@ async function persistCanvas() {
   // Сохраняем таблицу авторов пикселей (только при изменениях)
   if (ownersDirty) {
     ownersDirty = false;
-    try {
-      // Uint16Array → Buffer little-endian
-      const ownerBuf = Buffer.from(pixelOwners.buffer, pixelOwners.byteOffset, pixelOwners.byteLength);
-      fs.writeFileSync(PIXEL_OWNERS_FILE, ownerBuf);
-    } catch(e) { console.error('❌ pixel_owners.bin save:', e.message); }
-    try {
-      const idsArr = [];
-      for (const [username, id] of ownerIdMap.entries()) {
-        const data = ownerDataMap.get(id);
-        idsArr.push({ id, username, emoji: data?.emoji || '👾', avatar: data?.avatar || null });
-      }
-      fs.writeFileSync(PIXEL_IDS_FILE, JSON.stringify(idsArr));
-    } catch(e) { console.error('❌ pixel_owner_ids.json save:', e.message); }
+    // Uint16Array → Buffer little-endian
+    const ownerBuf = Buffer.from(pixelOwners.buffer, pixelOwners.byteOffset, pixelOwners.byteLength);
+    const idsArr = [];
+    for (const [username, id] of ownerIdMap.entries()) {
+      const data = ownerDataMap.get(id);
+      idsArr.push({ id, username, emoji: data?.emoji || '👾', avatar: data?.avatar || null });
+    }
+    const idsJson = JSON.stringify(idsArr);
+
+    // Redis — переживает рестарт/редеплой сервера (в отличие от локального диска)
+    if (redis) {
+      try {
+        await redis.set('pixel_owners', ownerBuf.toString('base64'));
+        await redis.set('pixel_owner_ids', idsJson);
+      } catch(e) { console.error('❌ Redis pixel owners save:', e.message); }
+    }
+    // Локальный файл — дублирующий кэш на случай недоступности Redis
+    try { fs.writeFileSync(PIXEL_OWNERS_FILE, ownerBuf); } catch(e) { console.error('❌ pixel_owners.bin save:', e.message); }
+    try { fs.writeFileSync(PIXEL_IDS_FILE, idsJson); } catch(e) { console.error('❌ pixel_owner_ids.json save:', e.message); }
   }
 }
 
@@ -1330,6 +1377,30 @@ initDatabases().then(async () => {
       ws.send(JSON.stringify({ action:'toast', message:'Предмет не найден в инвентаре' })); return;
     }
 
+    // ── Кулдаун-ускорители — отдельная ветка, не рисуют пиксели ──
+    // Бусты не суммируются: активация нового заменяет старый (иначе игрок
+    // мог бы держать -90% часами, покупая по одному). Сохраняем в аккаунт
+    // percentage + абсолютный timestamp окончания — это переживает
+    // переподключение/обновление страницы (клиент получает его в auth_success).
+    if (COOLDOWN_BOOST_IDS[itemId]) {
+      const boost = COOLDOWN_BOOST_IDS[itemId];
+      const until = Date.now() + boost.durationMin * 60 * 1000;
+      inv[itemId]--;
+      if (inv[itemId] <= 0) delete inv[itemId];
+      acc.inventory = inv;
+      acc.cooldownBoostPct = boost.pct;
+      acc.cooldownBoostUntil = until;
+      accounts[acc.username] = { ...accounts[acc.username], inventory: inv, cooldownBoostPct: boost.pct, cooldownBoostUntil: until };
+      await dbSaveAccount(acc.username, { inventory: inv, cooldownBoostPct: boost.pct, cooldownBoostUntil: until });
+
+      let clientItems = [...acc.upgrades];
+      for (let k in inv) { for (let i = 0; i < inv[k]; i++) clientItems.push(k); }
+      ws.send(JSON.stringify({ action:'toast', message:`⚡ Ускоритель активирован: −${boost.pct}% на ${boost.durationMin} мин.`, type:'success' }));
+      ws.send(JSON.stringify({ action:'purchase_update', purchased_items: clientItems }));
+      ws.send(JSON.stringify({ action:'cooldown_boost_update', pct: boost.pct, until }));
+      return;
+    }
+
     const px = reqData?.x !== undefined ? reqData.x : (acc._lastPixel?.x ?? Math.floor(CANVAS_WIDTH/2));
     const py = reqData?.y !== undefined ? reqData.y : (acc._lastPixel?.y ?? Math.floor(CANVAS_HEIGHT/2));
     const reqColor = reqData?.color !== undefined ? reqData.color : (acc._lastColor ?? 0);
@@ -1572,6 +1643,7 @@ initDatabases().then(async () => {
                 friends:              ws.userData.friends              || [],
                 friend_requests_in:   ws.userData.friend_requests_in   || [],
                 friend_requests_out:  ws.userData.friend_requests_out  || [],
+                cooldown_boost:  (ws.userData.cooldownBoostUntil > Date.now()) ? { pct: ws.userData.cooldownBoostPct, until: ws.userData.cooldownBoostUntil } : null,
               }));
               broadcastOnlineCount();
               notifyFriendsPresence(ws.userData.username, true);
@@ -1646,6 +1718,7 @@ initDatabases().then(async () => {
             settings:  serverSettings,
             stencil:   ws.userData.active_stencil,
             saved_stencils: ws.userData.saved_stencils,
+            cooldown_boost: (ws.userData.cooldownBoostUntil > Date.now()) ? { pct: ws.userData.cooldownBoostPct, until: ws.userData.cooldownBoostUntil } : null,
             friends:              ws.userData.friends              || [],
             friend_requests_in:   ws.userData.friend_requests_in   || [],
             friend_requests_out:  ws.userData.friend_requests_out  || [],
