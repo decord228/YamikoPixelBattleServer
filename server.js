@@ -2302,7 +2302,15 @@ initDatabases().then(async () => {
           if (!ws.isAuthorized || !ws.userData.clan) return;
           const clan = await dbGetClan(ws.userData.clan);
           if (clan && clanHasPerm(clan, ws.userData.username, 'invite')) {
-            ws.send(JSON.stringify({ action: 'clan_requests', requests: clan.join_requests || [] }));
+            // Карточки заявителей (аватар/эмодзи/ранг/баннер) — тот же принцип,
+            // что и member_cards, чтобы карточка заявки выглядела как везде
+            // (лидерборд/список участников), а не голым именем.
+            const reqCards = {};
+            await Promise.all((clan.join_requests || []).map(async (u) => {
+              const acc = await dbGetAccount(u);
+              if (acc) reqCards[u] = { emoji: acc.emoji || '👾', avatar: getAvatarUrl(acc), rank: acc.rank || 'Новичок', banner: acc.banner_id || null };
+            }));
+            ws.send(JSON.stringify({ action: 'clan_requests', requests: clan.join_requests || [], request_cards: reqCards }));
           }
         }
 
