@@ -301,14 +301,15 @@ const SHOP_ITEMS = [
   // USER
   { id: 'stencil_auto_1', title:'Авто-подбор цветов Ур.1', cost:100, role:'user', type:'upgrade' },
   { id: 'stencil_auto_2', title:'Авто-подбор цветов Ур.2', cost:300, role:'user', type:'upgrade' },
+  // Общие расходники (доступны всем, не требуют VIP)
+  { id: 'bomb_3x3',       title:'Цветная бомбочка 3×3',    cost:50,  role:'user', type:'consumable' },
+  { id: 'cooldown_boost_25', title:'Ускоритель −25%',    cost:60,  role:'user', type:'consumable', pct:25, durationMin:15 },
+  { id: 'cooldown_boost_50', title:'Ускоритель −50%',    cost:130, role:'user', type:'consumable', pct:50, durationMin:15 },
   // VIP
-  { id: 'bomb_3x3',       title:'Цветная бомбочка 3×3',    cost:50,  role:'vip',  type:'consumable' },
   { id: 'rainbow_5x5',    title:'Радужный взрыв 5×5',      cost:80,  role:'vip',  type:'consumable' },
   { id: 'eraser_10x10',   title:'Большой Ластик 10×10',    cost:120, role:'vip',  type:'consumable' },
   { id: 'mirror_stamp',   title:'Зеркальный штамп',        cost:200, role:'vip',  type:'consumable' },
-  // Кулдаун-ускорители (в процентах, см. useConsumable → cooldown_boost)
-  { id: 'cooldown_boost_25', title:'Ускоритель −25%',    cost:60,  role:'vip', type:'consumable', pct:25, durationMin:15 },
-  { id: 'cooldown_boost_50', title:'Ускоритель −50%',    cost:130, role:'vip', type:'consumable', pct:50, durationMin:15 },
+  // Кулдаун-ускоритель турбо остаётся VIP-эксклюзивом
   { id: 'cooldown_boost_90', title:'Турбо-режим −90%',   cost:220, role:'vip', type:'consumable', pct:90, durationMin:5  },
 ];
 
