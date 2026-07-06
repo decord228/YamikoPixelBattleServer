@@ -83,28 +83,28 @@ function getAvatarUrl(acc) {
 //                     кода (правило №5 плана).
 const PROFILE_BANNERS_BUILTIN = [
   { id:'banner_none',    tier:'free', name:'Без баннера',   cost:0, css:null },
-  { id:'banner_c_white', tier:'free', name:'Белый',         cost:10, css:'#e4e4e4' },
-  { id:'banner_c_slate', tier:'free', name:'Графит',        cost:10, css:'#3a3a3a' },
-  { id:'banner_c_black', tier:'free', name:'Чёрный',        cost:10, css:'#1a1a1a' },
-  { id:'banner_c_red',   tier:'free', name:'Красный',       cost:10, css:'#e40000' },
-  { id:'banner_c_orange',tier:'free', name:'Оранжевый',     cost:10, css:'#ff9600' },
-  { id:'banner_c_yellow',tier:'free', name:'Жёлтый',        cost:10, css:'#ffd635' },
-  { id:'banner_c_green', tier:'free', name:'Зелёный',       cost:10, css:'#00a368' },
-  { id:'banner_c_teal',  tier:'free', name:'Бирюзовый',     cost:10, css:'#009eaa' },
-  { id:'banner_c_blue',  tier:'free', name:'Синий',         cost:10, css:'#2450a4' },
-  { id:'banner_c_indigo',tier:'free', name:'Индиго',        cost:10, css:'#493ac1' },
-  { id:'banner_c_purple',tier:'free', name:'Пурпурный',     cost:10, css:'#811e9f' },
-  { id:'banner_c_pink',  tier:'free', name:'Розовый',       cost:10, css:'#ff6392' },
+  { id:'banner_c_white', tier:'free', name:'Белый',         cost:3,  css:'#e4e4e4' },
+  { id:'banner_c_slate', tier:'free', name:'Графит',        cost:3,  css:'#3a3a3a' },
+  { id:'banner_c_black', tier:'free', name:'Чёрный',        cost:3,  css:'#1a1a1a' },
+  { id:'banner_c_red',   tier:'free', name:'Красный',       cost:3,  css:'#e40000' },
+  { id:'banner_c_orange',tier:'free', name:'Оранжевый',     cost:3,  css:'#ff9600' },
+  { id:'banner_c_yellow',tier:'free', name:'Жёлтый',        cost:3,  css:'#ffd635' },
+  { id:'banner_c_green', tier:'free', name:'Зелёный',       cost:3,  css:'#00a368' },
+  { id:'banner_c_teal',  tier:'free', name:'Бирюзовый',     cost:3,  css:'#009eaa' },
+  { id:'banner_c_blue',  tier:'free', name:'Синий',         cost:3,  css:'#2450a4' },
+  { id:'banner_c_indigo',tier:'free', name:'Индиго',        cost:3,  css:'#493ac1' },
+  { id:'banner_c_purple',tier:'free', name:'Пурпурный',     cost:3,  css:'#811e9f' },
+  { id:'banner_c_pink',  tier:'free', name:'Розовый',       cost:3,  css:'#ff6392' },
 
-  { id:'banner_sunset',  tier:'gradient', name:'Закат',    cost:30, css:'linear-gradient(135deg,#ff9600,#d40078)' },
-  { id:'banner_ocean',   tier:'gradient', name:'Океан',    cost:30, css:'linear-gradient(135deg,#00756f,#2450a4)' },
-  { id:'banner_forest',  tier:'gradient', name:'Лес',      cost:30, css:'linear-gradient(135deg,#006030,#7eed56)' },
-  { id:'banner_royal',   tier:'gradient', name:'Аметист',  cost:30, css:'linear-gradient(135deg,#493ac1,#b44ac0)' },
-  { id:'banner_flame',   tier:'gradient', name:'Пламя',    cost:30, css:'linear-gradient(135deg,#8a0022,#ff9600)' },
-  { id:'banner_mint',    tier:'gradient', name:'Мята',     cost:30, css:'linear-gradient(135deg,#00a368,#51e9f4)' },
-  { id:'banner_candy',   tier:'gradient', name:'Малина',   cost:30, css:'linear-gradient(135deg,#d40078,#ff99aa)' },
-  { id:'banner_slate_g', tier:'gradient', name:'Графит',   cost:30, css:'linear-gradient(135deg,#1a1a1a,#3a3a3a)' },
-  { id:'banner_indigo_g',tier:'gradient', name:'Индиго',   cost:30, css:'linear-gradient(135deg,#1d2b53,#493ac1)' },
+  { id:'banner_sunset',  tier:'gradient', name:'Закат',    cost:10, css:'linear-gradient(135deg,#ff9600,#d40078)' },
+  { id:'banner_ocean',   tier:'gradient', name:'Океан',    cost:10, css:'linear-gradient(135deg,#00756f,#2450a4)' },
+  { id:'banner_forest',  tier:'gradient', name:'Лес',      cost:10, css:'linear-gradient(135deg,#006030,#7eed56)' },
+  { id:'banner_royal',   tier:'gradient', name:'Аметист',  cost:10, css:'linear-gradient(135deg,#493ac1,#b44ac0)' },
+  { id:'banner_flame',   tier:'gradient', name:'Пламя',    cost:10, css:'linear-gradient(135deg,#8a0022,#ff9600)' },
+  { id:'banner_mint',    tier:'gradient', name:'Мята',     cost:10, css:'linear-gradient(135deg,#00a368,#51e9f4)' },
+  { id:'banner_candy',   tier:'gradient', name:'Малина',   cost:10, css:'linear-gradient(135deg,#d40078,#ff99aa)' },
+  { id:'banner_slate_g', tier:'gradient', name:'Графит',   cost:10, css:'linear-gradient(135deg,#1a1a1a,#3a3a3a)' },
+  { id:'banner_indigo_g',tier:'gradient', name:'Индиго',   cost:10, css:'linear-gradient(135deg,#1d2b53,#493ac1)' },
 ];
 
 // Встроенные анимированные баннеры (CSS keyframes, см. .pbanner-anim-* в
@@ -112,11 +112,11 @@ const PROFILE_BANNERS_BUILTIN = [
 // с анимацией, `css` — фон под ней (градиент/цвет, участвует в кадрах).
 // Цена растёт по числу "слоёв"/сложности анимации, как просил заказчик.
 const PROFILE_BANNERS_ANIMATED_CSS = [
-  { id:'banner_a_pulse',    tier:'animated', name:'Пульс',        cost:200,  anim:'pbanner-anim-pulse',    css:'linear-gradient(135deg,#493ac1,#3690ea)' },
-  { id:'banner_a_tide',     tier:'animated', name:'Прилив',       cost:250,  anim:'pbanner-anim-tide',     css:'linear-gradient(120deg,#00756f,#2450a4,#00756f)' },
-  { id:'banner_a_aurora',   tier:'animated', name:'Аврора',       cost:450,  anim:'pbanner-anim-aurora',   css:'linear-gradient(120deg,#006030,#493ac1,#d40078,#006030)' },
-  { id:'banner_a_stardust', tier:'animated', name:'Звёздная пыль',cost:700,  anim:'pbanner-anim-stardust', css:'linear-gradient(135deg,#0a0a14,#1d2b53)' },
-  { id:'banner_a_rainbow',  tier:'animated', name:'Радуга',       cost:1000, anim:'pbanner-anim-rainbow',  css:'linear-gradient(90deg,#e40000,#ff9600,#ffd635,#00a368,#2450a4,#811e9f,#e40000)' },
+  { id:'banner_a_pulse',    tier:'animated', name:'Пульс',        cost:60,   anim:'pbanner-anim-pulse',    css:'linear-gradient(135deg,#493ac1,#3690ea)' },
+  { id:'banner_a_tide',     tier:'animated', name:'Прилив',       cost:75,   anim:'pbanner-anim-tide',     css:'linear-gradient(120deg,#00756f,#2450a4,#00756f)' },
+  { id:'banner_a_aurora',   tier:'animated', name:'Аврора',       cost:135,  anim:'pbanner-anim-aurora',   css:'linear-gradient(120deg,#006030,#493ac1,#d40078,#006030)' },
+  { id:'banner_a_stardust', tier:'animated', name:'Звёздная пыль',cost:210,  anim:'pbanner-anim-stardust', css:'linear-gradient(135deg,#0a0a14,#1d2b53)' },
+  { id:'banner_a_rainbow',  tier:'animated', name:'Радуга',       cost:300,  anim:'pbanner-anim-rainbow',  css:'linear-gradient(90deg,#e40000,#ff9600,#ffd635,#00a368,#2450a4,#811e9f,#e40000)' },
 ];
 
 // ── ГЕОМЕТРИЧЕСКИЕ БАННЕРЫ (Этап 2, доп. заказ заказчика: +6 баннеров) ──
@@ -128,12 +128,12 @@ const PROFILE_BANNERS_ANIMATED_CSS = [
 // gradient вместо background-position анимации) — см. .pbanner-geo-* в
 // style.css. Цены по той же логике сложности/красоты (100–1000).
 const PROFILE_BANNERS_GEOMETRIC = [
-  { id:'banner_g_hex',      tier:'animated', name:'Соты',             cost:350, anim:'pbanner-geo-hex',      css:'linear-gradient(120deg,#050308,#12081f,#2b1030,#12081f,#050308)' },
-  { id:'banner_g_triangle', tier:'animated', name:'Триангуляция',     cost:250, anim:'pbanner-geo-triangle', css:'#1d2b53' },
-  { id:'banner_g_stripes',  tier:'animated', name:'Диагонали',        cost:200, anim:'pbanner-geo-stripes',  css:'#2b1e3e' },
-  { id:'banner_g_rings',    tier:'animated', name:'Радар',            cost:350, anim:'pbanner-geo-rings',    css:'#0a0a14' },
-  { id:'banner_g_dots',     tier:'animated', name:'Пиксельная сетка', cost:200, anim:'pbanner-geo-dots',     css:'#1a1a1a' },
-  { id:'banner_g_bolt',     tier:'animated', name:'Молния',           cost:400, anim:'pbanner-geo-bolt',     css:'#1d2b53' },
+  { id:'banner_g_hex',      tier:'animated', name:'Соты',             cost:105, anim:'pbanner-geo-hex',      css:'linear-gradient(120deg,#050308,#12081f,#2b1030,#12081f,#050308)' },
+  { id:'banner_g_triangle', tier:'animated', name:'Триангуляция',     cost:75,  anim:'pbanner-geo-triangle', css:'#1d2b53' },
+  { id:'banner_g_stripes',  tier:'animated', name:'Диагонали',        cost:60,  anim:'pbanner-geo-stripes',  css:'#2b1e3e' },
+  { id:'banner_g_rings',    tier:'animated', name:'Радар',            cost:105, anim:'pbanner-geo-rings',    css:'#0a0a14' },
+  { id:'banner_g_dots',     tier:'animated', name:'Пиксельная сетка', cost:60,  anim:'pbanner-geo-dots',     css:'#1a1a1a' },
+  { id:'banner_g_bolt',     tier:'animated', name:'Молния',           cost:120, anim:'pbanner-geo-bolt',     css:'#1d2b53' },
 ];
 
 // ── ПРЕМИУМ-БАННЕРЫ (Этап 3, доп. заказ: "больше сложности, шедевры") ──
@@ -142,15 +142,15 @@ const PROFILE_BANNERS_GEOMETRIC = [
 // пастельная эстетика ("пикми") — как просил заказчик. Цены — по
 // визуальной сложности (350 — простейшие частицы, 950 — самые многослойные).
 const PROFILE_BANNERS_PREMIUM = [
-  { id:'banner_p_starfield',     tier:'animated', name:'Звёздное небо',   cost:450, anim:'pbanner-prem-starfield',     css:'linear-gradient(160deg,#05050f,#1d2b53,#05050f)' },
-  { id:'banner_p_galaxy',        tier:'animated', name:'Галактика',       cost:900, anim:'pbanner-prem-galaxy',        css:'radial-gradient(circle at 50% 50%,#1d0f30,#05050a 70%)' },
-  { id:'banner_p_sakura',        tier:'animated', name:'Сакура',          cost:500, anim:'pbanner-prem-sakura',        css:'linear-gradient(160deg,#ffd6e8,#ff9ec4,#6a3a7a)' },
-  { id:'banner_p_pikmi',         tier:'animated', name:'Пикми',           cost:400, anim:'pbanner-prem-pikmi',         css:'linear-gradient(135deg,#ffd6f0,#c8b6ff,#b6f0ff,#ffe9b6)' },
-  { id:'banner_p_matrix',        tier:'animated', name:'Матрица',         cost:450, anim:'pbanner-prem-matrix',        css:'#040a04' },
-  { id:'banner_p_supernova',     tier:'animated', name:'Сверхновая',      cost:700, anim:'pbanner-prem-supernova',     css:'radial-gradient(circle at 50% 50%,#2b1000,#05050a 75%)' },
-  { id:'banner_p_lava',          tier:'animated', name:'Лава',            cost:550, anim:'pbanner-prem-lava',          css:'linear-gradient(160deg,#1a0505,#3a0a0a)' },
-  { id:'banner_p_ocean_deep',    tier:'animated', name:'Глубина океана',  cost:600, anim:'pbanner-prem-ocean',         css:'linear-gradient(180deg,#00343a,#001a20)' },
-  { id:'banner_p_constellation', tier:'animated', name:'Созвездие',       cost:950, anim:'pbanner-prem-constellation', css:'linear-gradient(160deg,#05050f,#0d1230,#05050f)' },
+  { id:'banner_p_starfield',     tier:'animated', name:'Звёздное небо',   cost:135, anim:'pbanner-prem-starfield',     css:'linear-gradient(160deg,#05050f,#1d2b53,#05050f)' },
+  { id:'banner_p_galaxy',        tier:'animated', name:'Галактика',       cost:270, anim:'pbanner-prem-galaxy',        css:'radial-gradient(circle at 50% 50%,#1d0f30,#05050a 70%)' },
+  { id:'banner_p_sakura',        tier:'animated', name:'Сакура',          cost:150, anim:'pbanner-prem-sakura',        css:'linear-gradient(160deg,#ffd6e8,#ff9ec4,#6a3a7a)' },
+  { id:'banner_p_pikmi',         tier:'animated', name:'Пикми',           cost:120, anim:'pbanner-prem-pikmi',         css:'linear-gradient(135deg,#ffd6f0,#c8b6ff,#b6f0ff,#ffe9b6)' },
+  { id:'banner_p_matrix',        tier:'animated', name:'Матрица',         cost:135, anim:'pbanner-prem-matrix',        css:'#040a04' },
+  { id:'banner_p_supernova',     tier:'animated', name:'Сверхновая',      cost:210, anim:'pbanner-prem-supernova',     css:'radial-gradient(circle at 50% 50%,#2b1000,#05050a 75%)' },
+  { id:'banner_p_lava',          tier:'animated', name:'Лава',            cost:165, anim:'pbanner-prem-lava',          css:'linear-gradient(160deg,#1a0505,#3a0a0a)' },
+  { id:'banner_p_ocean_deep',    tier:'animated', name:'Глубина океана',  cost:180, anim:'pbanner-prem-ocean',         css:'linear-gradient(180deg,#00343a,#001a20)' },
+  { id:'banner_p_constellation', tier:'animated', name:'Созвездие',       cost:285, anim:'pbanner-prem-constellation', css:'linear-gradient(160deg,#05050f,#0d1230,#05050f)' },
 ];
 
 const BANNERS_DIR          = path.join(__dirname, 'resources', 'banners');
@@ -225,7 +225,7 @@ function getPixelOwner(x, y) {
 // ── SERVER SETTINGS ────────────────────────────────────────
 let serverSettings = {
   cursorTrackingEnabled: false,
-  cooldownMs: 3000,
+  cooldownMs: 10000,
   globalStencil: null,
   // ── ЛОКАУТ (глобальное закрытие Пиксель Батла) ──
   lockdown: { active: false, until: 0, message: '' },
@@ -299,18 +299,18 @@ function getRank(pixels) {
 // ── SHOP CATALOGUE ─────────────────────────────────────────
 const SHOP_ITEMS = [
   // USER
-  { id: 'stencil_auto_1', title:'Авто-подбор цветов Ур.1', cost:100, role:'user', type:'upgrade' },
-  { id: 'stencil_auto_2', title:'Авто-подбор цветов Ур.2', cost:300, role:'user', type:'upgrade' },
+  { id: 'stencil_auto_1', title:'Авто-подбор цветов Ур.1', cost:70,  role:'user', type:'upgrade' },
+  { id: 'stencil_auto_2', title:'Авто-подбор цветов Ур.2', cost:150, role:'user', type:'upgrade' },
   // Общие расходники (доступны всем, не требуют VIP)
-  { id: 'bomb_3x3',       title:'Цветная бомбочка 3×3',    cost:50,  role:'user', type:'consumable' },
-  { id: 'cooldown_boost_25', title:'Ускоритель −25%',    cost:60,  role:'user', type:'consumable', pct:25, durationMin:15 },
-  { id: 'cooldown_boost_50', title:'Ускоритель −50%',    cost:130, role:'user', type:'consumable', pct:50, durationMin:15 },
+  { id: 'bomb_3x3',       title:'Цветная бомбочка 3×3',    cost:5,   role:'user', type:'consumable' },
+  { id: 'cooldown_boost_25', title:'Ускоритель −25%',    cost:10,  role:'user', type:'consumable', pct:25, durationMin:15 },
+  { id: 'cooldown_boost_50', title:'Ускоритель −50%',    cost:25,  role:'user', type:'consumable', pct:50, durationMin:15 },
   // VIP
-  { id: 'rainbow_5x5',    title:'Радужный взрыв 5×5',      cost:80,  role:'vip',  type:'consumable' },
-  { id: 'eraser_10x10',   title:'Большой Ластик 10×10',    cost:120, role:'vip',  type:'consumable' },
-  { id: 'mirror_stamp',   title:'Зеркальный штамп',        cost:200, role:'vip',  type:'consumable' },
+  { id: 'rainbow_5x5',    title:'Радужный взрыв 5×5',      cost:12,  role:'vip',  type:'consumable' },
+  { id: 'eraser_10x10',   title:'Большой Ластик 10×10',    cost:20,  role:'vip',  type:'consumable' },
+  { id: 'mirror_stamp',   title:'Зеркальный штамп',        cost:35,  role:'vip',  type:'consumable' },
   // Кулдаун-ускоритель турбо остаётся VIP-эксклюзивом
-  { id: 'cooldown_boost_90', title:'Турбо-режим −90%',   cost:220, role:'vip', type:'consumable', pct:90, durationMin:5  },
+  { id: 'cooldown_boost_90', title:'Турбо-режим −90%',   cost:55,  role:'vip', type:'consumable', pct:90, durationMin:5  },
 ];
 
 const COOLDOWN_BOOST_IDS = { cooldown_boost_25:{pct:25,durationMin:15}, cooldown_boost_50:{pct:50,durationMin:15}, cooldown_boost_90:{pct:90,durationMin:5} };
@@ -545,15 +545,15 @@ async function dbGetAllAccounts() {
 const CLAN_BASE_MEMBER_LIMIT = 5;
 
 const CLAN_MEMBER_LIMIT_TIERS = [
-  { id:'members_10',  limit:10,  cost:100  },
-  { id:'members_25',  limit:25,  cost:300  },
-  { id:'members_50',  limit:50,  cost:1000 },
-  { id:'members_100', limit:100, cost:5000 },
+  { id:'members_10',  limit:10,  cost:30   },
+  { id:'members_25',  limit:25,  cost:90   },
+  { id:'members_50',  limit:50,  cost:300  },
+  { id:'members_100', limit:100, cost:1500 },
 ];
 
 const CLAN_SHOP_ITEMS = [
-  { id:'banner_static',   cost:200, requires:null },
-  { id:'banner_animated', cost:500, requires:'banner_static' },
+  { id:'banner_static',   cost:60,  requires:null },
+  { id:'banner_animated', cost:150, requires:'banner_static' },
 ];
 
 const CLAN_ANIMATED_BANNER_EXT = ['.gif', '.webp', '.apng'];
