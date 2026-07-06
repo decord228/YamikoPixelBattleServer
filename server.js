@@ -296,6 +296,54 @@ function getRank(pixels) {
   return [...RANK_THRESHOLDS].reverse().find(r => pixels >= r.min) || RANK_THRESHOLDS[0];
 }
 
+// Награда монетами за достижение нового звания (выдаётся один раз, в момент
+// пересечения порога пикселей). Ключи — имена из RANK_THRESHOLDS, значения
+// ДОЛЖНЫ совпадать с RANK_REWARDS в config.js (используется там только для
+// отображения бейджа награды в прогресс-баре звания).
+const RANK_REWARDS = { 'Новичок':0, 'Художник':20, 'Маэстро':60, 'Легенда':200, 'Архитектор':500, 'Бог Пикселей':2000 };
+
+// ── АЧИВКИ (server-side источник правды) ──────────────────
+// Зеркало ACHIEVEMENTS из config.js + награда опытом (xp). Живёт отдельно от
+// клиента, т.к. server.js — чистый Node без доступа к window/config.js.
+// stats считается из уже существующих полей аккаунта — новых полей в БД
+// требуется всего два: xp (number) и unlocked_achievements (string[]).
+const ACHIEVEMENTS_DEF = [
+  { id:'first_pixel',    title:'Первый мазок',       icon:'🖌️', xp:10,  check: s => s.pixels >= 1 },
+  { id:'pixels_50',      title:'Начинающий',         icon:'🌱', xp:20,  check: s => s.pixels >= 50 },
+  { id:'pixels_200',     title:'Художник',           icon:'🎨', xp:40,  check: s => s.pixels >= 200 },
+  { id:'pixels_1000',    title:'Легенда',            icon:'⭐', xp:80,  check: s => s.pixels >= 1000 },
+  { id:'pixels_5000',    title:'Архитектор',         icon:'🏛️', xp:150, check: s => s.pixels >= 5000 },
+  { id:'pixels_20000',   title:'Бог Пикселей',       icon:'👑', xp:300, check: s => s.pixels >= 20000 },
+  { id:'coins_500',      title:'Коллекционер',       icon:'🪙', xp:30,  check: s => s.coins >= 500 },
+  { id:'coins_5000',     title:'Магнат',             icon:'💰', xp:100, check: s => s.coins >= 5000 },
+  { id:'first_purchase', title:'Первая покупка',     icon:'🛒', xp:15,  check: s => s.purchasedCount > 0 },
+  { id:'clan_member',    title:'Не один в поле',     icon:'🚩', xp:20,  check: s => !!s.clan },
+  { id:'friend_1',       title:'Первый друг',        icon:'🤝', xp:15,  check: s => s.friendsCount >= 1 },
+  { id:'friend_5',       title:'Душа компании',      icon:'🎉', xp:35,  check: s => s.friendsCount >= 5 },
+  { id:'vip',            title:'Особый статус',      icon:'💎', xp:50,  check: s => s.isVip || s.isAdmin },
+];
+// 'session_100' ("поставь 100 пикселей за сессию") намеренно НЕ включён
+// сюда — счётчик сессии живёт только в клиентском state.js и не
+// персистится на сервере, поэтому её отслеживает и подсвечивает сам
+// клиент (см. buildAchievementStats/renderProfileAchievementsTab в ui.js).
+
+function buildAchievementStats(acc) {
+  const purchasedCount = (acc.upgrades || []).length +
+    Object.values(acc.inventory || {}).reduce((a, b) => a + b, 0);
+  return {
+    pixels: acc.pixels || 0,
+    coins: acc.coins || 0,
+    clan: acc.clan || '',
+    purchasedCount,
+    friendsCount: (acc.friends || []).length,
+    isVip: acc.role === 'vip',
+    isAdmin: acc.role === 'admin',
+  };
+}
+// checkAchievements(username, acc, opts) сама функция определена ниже,
+// внутри области видимости WebSocket-сервера (см. рядом с sendToUser) —
+// ей нужен доступ к wss.clients, чтобы отправить уведомление игроку.
+
 // ── SHOP CATALOGUE ─────────────────────────────────────────
 const SHOP_ITEMS = [
   // USER
@@ -1232,6 +1280,31 @@ initDatabases().then(async () => {
     });
   }
 
+  // Проверяет ачивки аккаунта, разблокирует новые, начисляет xp и (если
+  // silent=false) шлёт клиенту уведомление achievement_unlocked для тоста.
+  // silent=true используется при логине — чтобы "досчитать" задним числом
+  // уже выполненные условия у существующих игроков без спама уведомлениями.
+  async function checkAchievements(username, acc, { silent = false } = {}) {
+    const stats = buildAchievementStats(acc);
+    const already = new Set(acc.unlocked_achievements || []);
+    const newly = [];
+    for (const a of ACHIEVEMENTS_DEF) {
+      if (already.has(a.id)) continue;
+      let pass = false;
+      try { pass = a.check(stats); } catch (_) {}
+      if (pass) { already.add(a.id); newly.push(a); }
+    }
+    if (!newly.length) return;
+    acc.unlocked_achievements = Array.from(already);
+    acc.xp = (acc.xp || 0) + newly.reduce((s, a) => s + (a.xp || 0), 0);
+    try { await dbSaveAccount(username, { unlocked_achievements: acc.unlocked_achievements, xp: acc.xp }); } catch (_) {}
+    if (!silent) {
+      for (const a of newly) {
+        sendToUser(username, { action: 'achievement_unlocked', id: a.id, title: a.title, icon: a.icon, xp: a.xp });
+      }
+    }
+  }
+
   // ── СОЦИАЛЬНАЯ СЕТЬ: ДРУЗЬЯ / ЛС / ОНЛАЙН ──────────────────
   // Находит открытый сокет по username (последний залогинившийся, если открыто
   // несколько вкладок — сообщения всё равно уйдут во все его сокеты через forEach).
@@ -1515,9 +1588,19 @@ initDatabases().then(async () => {
           acc._lastColor = colorIdx;
 
           const prevCoins = acc.coins || 0;
+          const prevRank  = acc.rank;
           acc.pixels = (acc.pixels || 0) + 1;
           acc.coins = (acc.coins || 0) + COINS_PER_PIXEL;
           acc.rank  = getRank(acc.pixels).name;
+
+          // ── Награда за новое звание ──
+          // Пересекли порог пикселей нового звания — начисляем монеты один раз,
+          // прямо в акк (попадёт в тот же батч-сейв ниже, доп. запись в БД не нужна).
+          let rankUpReward = 0;
+          if (acc.rank !== prevRank) {
+            rankUpReward = RANK_REWARDS[acc.rank] || 0;
+            if (rankUpReward > 0) acc.coins += rankUpReward;
+          }
 
           accounts[acc.username] = { ...accounts[acc.username], pixels: acc.pixels, coins: acc.coins, rank: acc.rank };
           dirtyAccounts.add(acc.username);
@@ -1528,9 +1611,19 @@ initDatabases().then(async () => {
             dirtyClans.add(acc.clan);
           }
 
+          if (rankUpReward > 0) {
+            const rankInfo = getRank(acc.pixels);
+            ws.send(JSON.stringify({ action: 'rank_up', rank: acc.rank, icon: rankInfo.icon, coins: rankUpReward }));
+          }
+
           if (Math.floor(acc.coins) > Math.floor(prevCoins)) {
             ws.send(JSON.stringify({ action: 'coins_update', coins: acc.coins, pixels: acc.pixels }));
           }
+
+          // Ачивки проверяем на каждый пиксель, но это дёшево (просто сравнения
+          // в памяти) — запись в БД происходит, только если реально что-то
+          // разблокировалось. Не await'им, чтобы не тормозить приём пикселей.
+          checkAchievements(acc.username, acc).catch(() => {});
         }
         return;
       }
@@ -1586,6 +1679,8 @@ initDatabases().then(async () => {
                   dm_reads:            {},
                   banner_id:           null,
                   owned_banners:       [],
+                  xp:                  0,
+                  unlocked_achievements: [],
                 };
                 await dbSaveAccount(username, acc);
               } else {
@@ -1616,6 +1711,13 @@ initDatabases().then(async () => {
               ws.userData.friend_requests_out  = ws.userData.friend_requests_out  || [];
               ws.userData.dm_reads             = ws.userData.dm_reads             || {};
               ws.userData.owned_banners        = ws.userData.owned_banners        || [];
+              ws.userData.xp                   = ws.userData.xp                   || 0;
+              ws.userData.unlocked_achievements = ws.userData.unlocked_achievements || [];
+
+              // Досчитываем задним числом уже выполненные ачивки (тихо, без тоста) —
+              // важно, например, для игроков, залогинившихся впервые после
+              // выкатки этой фичи.
+              checkAchievements(ws.userData.username, ws.userData, { silent: true }).catch(() => {});
 
               let clientItems = [...ws.userData.upgrades];
               for (let k in ws.userData.inventory) {
@@ -1635,6 +1737,8 @@ initDatabases().then(async () => {
                 banners_catalog: PROFILE_BANNERS,
                 coins:           ws.userData.coins     || 0,
                 clan:            ws.userData.clan      || '',
+                xp:              ws.userData.xp        || 0,
+                unlocked_achievements: ws.userData.unlocked_achievements || [],
                 purchased_items: clientItems,
                 canvas_w:        CANVAS_WIDTH,
                 canvas_h:        CANVAS_HEIGHT,
@@ -1672,7 +1776,7 @@ initDatabases().then(async () => {
             if (existing) { ws.send(JSON.stringify({ action:'toast', message:'Ник уже занят!' })); return; }
             let role = 'user';
             if ((username === 'd3cord' && email === 'otarasik10@gmail.com') || username === ADMIN_USERNAME) role = 'admin';
-            const newUser = { username, password, email, role, pixels: 0, rank: 'Новичок', emoji: '👾', banned: false, timeout_until: 0, coins: 0, clan: '', inventory: {}, upgrades: [], active_stencil: null, saved_stencils: [], friends: [], friend_requests_in: [], friend_requests_out: [], dm_reads: {}, banner_id: null, owned_banners: [] };
+            const newUser = { username, password, email, role, pixels: 0, rank: 'Новичок', emoji: '👾', banned: false, timeout_until: 0, coins: 0, clan: '', inventory: {}, upgrades: [], active_stencil: null, saved_stencils: [], friends: [], friend_requests_in: [], friend_requests_out: [], dm_reads: {}, banner_id: null, owned_banners: [], xp: 0, unlocked_achievements: [] };
             await dbSaveAccount(username, newUser);
             ws.userData = { ...newUser };
           } else {
@@ -1694,6 +1798,11 @@ initDatabases().then(async () => {
           ws.userData.friend_requests_out  = ws.userData.friend_requests_out  || [];
           ws.userData.dm_reads             = ws.userData.dm_reads             || {};
           ws.userData.owned_banners        = ws.userData.owned_banners        || [];
+          ws.userData.xp                   = ws.userData.xp                   || 0;
+          ws.userData.unlocked_achievements = ws.userData.unlocked_achievements || [];
+
+          // Досчитываем задним числом уже выполненные ачивки (тихо, без тоста).
+          checkAchievements(ws.userData.username, ws.userData, { silent: true }).catch(() => {});
 
           let clientItems = [...ws.userData.upgrades];
           for (let k in ws.userData.inventory) {
@@ -1713,6 +1822,8 @@ initDatabases().then(async () => {
             banners_catalog: PROFILE_BANNERS,
             coins:     ws.userData.coins     || 0,
             clan:      ws.userData.clan      || '',
+            xp:              ws.userData.xp        || 0,
+            unlocked_achievements: ws.userData.unlocked_achievements || [],
             purchased_items: clientItems,
             canvas_w:  CANVAS_WIDTH,
             canvas_h:  CANVAS_HEIGHT,
@@ -1880,6 +1991,13 @@ initDatabases().then(async () => {
               requestSent:     (me.friend_requests_out || []).includes(acc.username),
               requestReceived: (me.friend_requests_in  || []).includes(acc.username),
               owned_banners:   acc.owned_banners || [],
+              // ── Этап 4: публичные ачивки + прогресс звания ──
+              // xp/unlocked_achievements не приватны (в отличие от coins/email) —
+              // это витрина достижений, её можно смотреть в чужом профиле.
+              xp:                    acc.xp || 0,
+              unlocked_achievements: acc.unlocked_achievements || [],
+              purchased_count:       (acc.upgrades || []).length + Object.values(acc.inventory || {}).reduce((a,b)=>a+b,0),
+              friends_count:         (acc.friends || []).length,
             }),
           }));
         }
@@ -1947,6 +2065,10 @@ initDatabases().then(async () => {
           await sendFriendsUpdate(me);
           await sendFriendsUpdate(from);
           sendToUser(from, { action:'toast', message:`✅ ${me} принял(а) вашу заявку в друзья!`, type:'success' });
+
+          ws.userData.friends = meFriends;
+          checkAchievements(me, ws.userData).catch(() => {});
+          dbGetAccount(from).then(a => a && checkAchievements(from, a)).catch(() => {});
         }
 
         else if (action === 'friend_decline') {
@@ -2102,6 +2224,7 @@ initDatabases().then(async () => {
              treasury: 0, treasury_log: [], shop_items: [], member_limit: CLAN_BASE_MEMBER_LIMIT
           });
           ws.send(JSON.stringify({ action:'clan_update', clan: await dbGetClan(name), coins: ws.userData.coins, message:`Клан "${name}" создан!` }));
+          checkAchievements(ws.userData.username, ws.userData).catch(() => {});
         }
 
         else if (action === 'clan_join') {
@@ -2131,6 +2254,7 @@ initDatabases().then(async () => {
           ws.userData.clan = name;
           ws.send(JSON.stringify({ action:'clan_update', clan:{...clan, members:newMembers}, coins:ws.userData.coins, message:`Вы вступили в клан "${name}"!` }));
           broadcastToClan(name, JSON.stringify({ action:'clan_member_joined', username:ws.userData.username }), ws);
+          checkAchievements(ws.userData.username, ws.userData).catch(() => {});
         }
 
         else if (action === 'clan_update_settings') {
@@ -2625,6 +2749,7 @@ initDatabases().then(async () => {
           }
 
           ws.send(JSON.stringify({ action:'purchase_update', purchased_items: clientItems, coins: newCoins, message:`✅ Куплено: ${item.title}` }));
+          checkAchievements(ws.userData.username, ws.userData).catch(() => {});
         }
 
         else if (action === 'use_item') {
