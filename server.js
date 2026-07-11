@@ -343,25 +343,47 @@ function getRank(xp) {
 // градиенты, после половины списка — анимированные + товары магазина.
 // Ключи ДОЛЖНЫ совпадать 1-в-1 с RANK_REWARDS в config.js.
 const RANK_REWARDS = {
-  'Новичок':            null,
-  'Ученик':             { type:'coins',     amount:15 },
-  'Художник':           { type:'coins',     amount:20 },
-  'Подмастерье':        { type:'banner',    tier:'free' },
-  'Маэстро':            { type:'coins',     amount:60 },
-  'Виртуоз':            { type:'banner',    tier:'free' },
-  'Вдохновлённый':      { type:'vip_temp',  hours:1 },
-  'Легенда':            { type:'banner',    tier:'gradient' },
-  'Чемпион':            { type:'coins',     amount:150 },
-  'Мастер Цвета':       { type:'banner',    tier:'gradient' },
-  'Хранитель Холста':   { type:'shop_item', itemId:'cooldown_boost_25' },
-  'Архитектор':         { type:'coins',     amount:500 },
-  'Зодчий':             { type:'vip_temp',  hours:24 },
-  'Творец Миров':       { type:'banner',    tier:'animated' },
-  'Провидец':           { type:'shop_item', itemId:'cooldown_boost_50' },
-  'Император Пикселей': { type:'banner',    tier:'animated' },
-  'Небожитель':         { type:'coins',     amount:1000 },
-  'Бог Пикселей':       { type:'coins',     amount:2000 },
+  'Новичок':            [],
+  'Ученик':             [{ type:'coins',     amount:15 }],
+  'Художник':           [{ type:'coins',     amount:20 }],
+  'Подмастерье':        [{ type:'banner',    tier:'free' }],
+  'Маэстро':            [{ type:'coins',     amount:60 }],
+  'Виртуоз':            [{ type:'banner',    tier:'free' }],
+  'Вдохновлённый':      [{ type:'coins',     amount:50 }, { type:'vip_temp', hours:1 }],
+  'Легенда':            [{ type:'banner',    tier:'gradient' }],
+  'Чемпион':            [{ type:'coins',     amount:150 }],
+  'Мастер Цвета':       [{ type:'banner',    tier:'gradient' }],
+  'Хранитель Холста':   [{ type:'shop_item', itemId:'cooldown_boost_25' }],
+  'Архитектор':         [{ type:'coins',     amount:500 }],
+  'Зодчий':             [{ type:'coins',     amount:400 }, { type:'vip_temp', hours:24 }],
+  'Творец Миров':       [{ type:'banner',    tier:'animated' }],
+  'Провидец':           [{ type:'shop_item', itemId:'cooldown_boost_50' }],
+  'Император Пикселей': [{ type:'banner',    tier:'animated' }],
+  'Небожитель':         [{ type:'coins',     amount:1000 }],
+  'Бог Пикселей':       [{ type:'coins',     amount:2000 }],
 };
+
+// Зеркало getRankCheckpoints() из config.js (сервер не может импортировать
+// клиентский файл — держим логику идентичной вручную). Награда открывается
+// не сразу по достижению звания, а на xp МЕЖДУ min этого звания и min
+// следующего: при N наградах отрезок делится на N+1 равных частей.
+function getRankCheckpoints(rankName) {
+  const rewards = RANK_REWARDS[rankName];
+  if (!rewards || !rewards.length) return [];
+  const idx = RANK_THRESHOLDS.findIndex(r => r.name === rankName);
+  if (idx === -1) return [];
+  const rank = RANK_THRESHOLDS[idx];
+  const next = RANK_THRESHOLDS[idx + 1];
+  const span = next ? (next.min - rank.min) : 0;
+  const count = rewards.length;
+  return rewards.map((reward, i) => ({
+    id: `${rankName}#${i}`,
+    reward,
+    index: i,
+    count,
+    xpRequired: next ? Math.round(rank.min + span * (i + 1) / (count + 1)) : rank.min,
+  }));
+}
 
 // ── АЧИВКИ (server-side источник правды) ──────────────────
 // Зеркало ACHIEVEMENTS из config.js + награда опытом (xp). Живёт отдельно от
@@ -1780,7 +1802,7 @@ initDatabases().then(async () => {
 
           if (acc.rank !== prevRank) {
             const rankInfo = getRank(acc.xp);
-            const hasReward = !!RANK_REWARDS[acc.rank];
+            const hasReward = (RANK_REWARDS[acc.rank] || []).length > 0;
             ws.send(JSON.stringify({ action: 'rank_up', rank: acc.rank, icon: rankInfo.icon, xp: acc.xp, claimable: hasReward }));
           }
 
@@ -3009,14 +3031,19 @@ initDatabases().then(async () => {
           const rankDef  = RANK_THRESHOLDS.find(r => r.name === rankName);
           if (!rankDef) { ws.send(JSON.stringify({ action:'toast', message:'Звание не найдено' })); return; }
 
+          const checkpoints = getRankCheckpoints(rankName);
+          const idx = Number.isInteger(data.idx) ? data.idx : 0;
+          const checkpoint = checkpoints.find(c => c.index === idx);
+          if (!checkpoint) { ws.send(JSON.stringify({ action:'toast', message:'Награда не найдена' })); return; }
+
           const acc = await dbGetAccount(ws.userData.username);
           const xp  = acc.xp || 0;
-          if (xp < rankDef.min) { ws.send(JSON.stringify({ action:'toast', message:'Это звание ещё не достигнуто' })); return; }
+          if (xp < checkpoint.xpRequired) { ws.send(JSON.stringify({ action:'toast', message:'Эта награда ещё не открыта' })); return; }
 
           const claimedRanks = acc.claimed_ranks || [];
-          if (claimedRanks.includes(rankName)) { ws.send(JSON.stringify({ action:'toast', message:'Награда уже получена' })); return; }
+          if (claimedRanks.includes(checkpoint.id)) { ws.send(JSON.stringify({ action:'toast', message:'Награда уже получена' })); return; }
 
-          const reward = RANK_REWARDS[rankName];
+          const reward = checkpoint.reward;
           let newCoins     = acc.coins || 0;
           let newOwnedBanners = acc.owned_banners || [];
           let newInventory    = acc.inventory || {};
@@ -3037,7 +3064,7 @@ initDatabases().then(async () => {
             }
           }
 
-          const newClaimedRanks = [...claimedRanks, rankName];
+          const newClaimedRanks = [...claimedRanks, checkpoint.id];
           await dbSaveAccount(ws.userData.username, {
             coins: newCoins, owned_banners: newOwnedBanners, inventory: newInventory, claimed_ranks: newClaimedRanks,
             role: acc.role, vip_temp_until: acc.vip_temp_until || 0, vip_temp_prev_role: acc.vip_temp_prev_role || '',
