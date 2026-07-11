@@ -343,7 +343,10 @@ function getRank(xp) {
 // градиенты, после половины списка — анимированные + товары магазина.
 // Ключи ДОЛЖНЫ совпадать 1-в-1 с RANK_REWARDS в config.js.
 const RANK_REWARDS = {
-  'Новичок':            [],
+  // ДОЛЖНО совпадать 1-в-1 с RANK_REWARDS в config.js (в т.ч. пустые/
+  // непустые массивы) — иначе клиент рисует чекпоинт, которого на сервере
+  // нет, и claim_rank_reward отвечает "Награда не найдена".
+  'Новичок':            [{ type:'coins',     amount:10 }],
   'Ученик':             [{ type:'coins',     amount:15 }],
   'Художник':           [{ type:'coins',     amount:20 }],
   'Подмастерье':        [{ type:'banner',    tier:'free' }],
@@ -383,6 +386,28 @@ function getRankCheckpoints(rankName) {
     count,
     xpRequired: next ? Math.round(rank.min + span * (i + 1) / (count + 1)) : rank.min,
   }));
+}
+
+// Зеркало RANK_COIN_BONUS из config.js — "монетная плашка" под карточкой
+// КАЖДОГО звания. Раньше была чистым UI-плейсхолдером без реальной выдачи;
+// теперь тоже требует ручного "Забрать" (см. coinChipHtml в ui.js), поэтому
+// нужен собственный чекпоинт с id "RankName#self" и порогом = min самого
+// звания (это награда САМОГО звания, а не "между" ним и следующим).
+const RANK_COIN_BONUS = Object.fromEntries(
+  RANK_THRESHOLDS.map(r => [r.name, Math.max(5, Math.round(r.min / 10))])
+);
+
+function getRankSelfCheckpoint(rankName) {
+  const rankDef = RANK_THRESHOLDS.find(r => r.name === rankName);
+  if (!rankDef) return null;
+  const amount = RANK_COIN_BONUS[rankName];
+  if (!amount) return null;
+  return {
+    id: `${rankName}#self`,
+    reward: { type: 'coins', amount },
+    index: 'self',
+    xpRequired: rankDef.min,
+  };
 }
 
 // ── АЧИВКИ (server-side источник правды) ──────────────────
@@ -3031,9 +3056,9 @@ initDatabases().then(async () => {
           const rankDef  = RANK_THRESHOLDS.find(r => r.name === rankName);
           if (!rankDef) { ws.send(JSON.stringify({ action:'toast', message:'Звание не найдено' })); return; }
 
-          const checkpoints = getRankCheckpoints(rankName);
-          const idx = Number.isInteger(data.idx) ? data.idx : 0;
-          const checkpoint = checkpoints.find(c => c.index === idx);
+          const checkpoint = data.idx === 'self'
+            ? getRankSelfCheckpoint(rankName)
+            : getRankCheckpoints(rankName).find(c => c.index === (Number.isInteger(data.idx) ? data.idx : 0));
           if (!checkpoint) { ws.send(JSON.stringify({ action:'toast', message:'Награда не найдена' })); return; }
 
           const acc = await dbGetAccount(ws.userData.username);
