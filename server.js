@@ -310,11 +310,13 @@ const RANK_THRESHOLDS = [
   { name:'Подмастерье',        icon:'🧵', min:350 },
   { name:'Маэстро',            icon:'🖌️', min:700 },
   { name:'Виртуоз',            icon:'🎭', min:1200 },
+  { name:'Вдохновлённый',      icon:'💫', min:1600 },
   { name:'Легенда',            icon:'⭐', min:2000 },
   { name:'Чемпион',            icon:'🏆', min:3000 },
   { name:'Мастер Цвета',       icon:'🌈', min:4200 },
   { name:'Хранитель Холста',   icon:'🛡️', min:5800 },
   { name:'Архитектор',         icon:'🏛️', min:7800 },
+  { name:'Зодчий',             icon:'🏗️', min:9000 },
   { name:'Творец Миров',       icon:'🌍', min:10200 },
   { name:'Провидец',           icon:'🔮', min:13000 },
   { name:'Император Пикселей', icon:'👁️', min:16200 },
@@ -347,11 +349,13 @@ const RANK_REWARDS = {
   'Подмастерье':        { type:'banner',    tier:'free' },
   'Маэстро':            { type:'coins',     amount:60 },
   'Виртуоз':            { type:'banner',    tier:'free' },
+  'Вдохновлённый':      { type:'vip_temp',  hours:1 },
   'Легенда':            { type:'banner',    tier:'gradient' },
   'Чемпион':            { type:'coins',     amount:150 },
   'Мастер Цвета':       { type:'banner',    tier:'gradient' },
   'Хранитель Холста':   { type:'shop_item', itemId:'cooldown_boost_25' },
   'Архитектор':         { type:'coins',     amount:500 },
+  'Зодчий':             { type:'vip_temp',  hours:24 },
   'Творец Миров':       { type:'banner',    tier:'animated' },
   'Провидец':           { type:'shop_item', itemId:'cooldown_boost_50' },
   'Император Пикселей': { type:'banner',    tier:'animated' },
@@ -370,13 +374,20 @@ const ACHIEVEMENTS_DEF = [
   { id:'pixels_200',     title:'Художник',           icon:'🎨', xp:40,  check: s => s.xp >= 200 },
   { id:'pixels_1000',    title:'Легенда',            icon:'⭐', xp:80,  check: s => s.xp >= 1000 },
   { id:'pixels_5000',    title:'Архитектор',         icon:'🏛️', xp:150, check: s => s.xp >= 5000 },
+  { id:'pixels_10000',   title:'Мастер оттенков',    icon:'🌀', xp:200, check: s => s.xp >= 10000 },
   { id:'pixels_20000',   title:'Бог Пикселей',       icon:'👑', xp:300, check: s => s.xp >= 20000 },
+  { id:'coins_100',      title:'Первая заначка',     icon:'👛', xp:15,  check: s => s.coins >= 100 },
   { id:'coins_500',      title:'Коллекционер',       icon:'🪙', xp:30,  check: s => s.coins >= 500 },
+  { id:'coins_1000',     title:'Богач',              icon:'💵', xp:60,  check: s => s.coins >= 1000 },
   { id:'coins_5000',     title:'Магнат',             icon:'💰', xp:100, check: s => s.coins >= 5000 },
   { id:'first_purchase', title:'Первая покупка',     icon:'🛒', xp:15,  check: s => s.purchasedCount > 0 },
+  { id:'purchase_5',     title:'Постоянный клиент',  icon:'🛍️', xp:25,  check: s => s.purchasedCount >= 5 },
+  { id:'purchase_20',    title:'Шопоголик',          icon:'🧾', xp:70,  check: s => s.purchasedCount >= 20 },
   { id:'clan_member',    title:'Не один в поле',     icon:'🚩', xp:20,  check: s => !!s.clan },
   { id:'friend_1',       title:'Первый друг',        icon:'🤝', xp:15,  check: s => s.friendsCount >= 1 },
   { id:'friend_5',       title:'Душа компании',      icon:'🎉', xp:35,  check: s => s.friendsCount >= 5 },
+  { id:'friend_10',      title:'Душа общества',      icon:'🎊', xp:60,  check: s => s.friendsCount >= 10 },
+  { id:'banners_3',      title:'Коллекционер баннеров', icon:'🖼️', xp:40, check: s => s.ownedBannersCount >= 3 },
   { id:'vip',            title:'Особый статус',      icon:'💎', xp:50,  check: s => s.isVip || s.isAdmin },
 ];
 // 'session_100' ("поставь 100 пикселей за сессию") намеренно НЕ включён
@@ -394,9 +405,57 @@ function buildAchievementStats(acc) {
     clan: acc.clan || '',
     purchasedCount,
     friendsCount: (acc.friends || []).length,
-    isVip: acc.role === 'vip',
+    ownedBannersCount: (acc.owned_banners || []).length,
+    isVip: acc.role === 'vip' || hasActiveTempVip(acc),
     isAdmin: acc.role === 'admin',
   };
+}
+
+// ── ВРЕМЕННЫЙ VIP (награда за промежуточные звания) ──────────
+// vip_temp_until — таймстамп (мс), до которого действует временный VIP,
+// выданный наградой за звание. vip_temp_prev_role — роль, которая была
+// у игрока ДО выдачи временного VIP (чтобы корректно вернуть её обратно,
+// а не затирать реального 'admin'/постоянного 'vip' после истечения).
+// Реальный постоянный VIP (acc.role === 'vip', выданный вручную/за деньги)
+// не трогаем и не понижаем.
+function hasActiveTempVip(acc) {
+  return !!(acc.vip_temp_until && acc.vip_temp_until > Date.now());
+}
+
+// Выдаёт (или продлевает) временный VIP-статус на hours часов.
+// Если уже активен временный VIP — продлевает от текущего истечения,
+// а не от текущего момента (иначе повторные награды перекрывали бы друг
+// друга вместо накопления).
+function grantTempVip(acc, hours) {
+  const now = Date.now();
+  const durationMs = hours * 60 * 60 * 1000;
+  if (!hasActiveTempVip(acc)) {
+    // Не понижаем реальный постоянный VIP/admin — просто не выдаём поверх
+    // него отдельный таймер понижения, но сам факт "особого статуса"
+    // всё равно есть, так что ачивка 'vip' и подобные будут засчитаны.
+    acc.vip_temp_prev_role = acc.role || 'user';
+    acc.vip_temp_until = now + durationMs;
+    if (acc.role !== 'admin' && acc.role !== 'vip') acc.role = 'vip';
+  } else {
+    acc.vip_temp_until += durationMs;
+  }
+}
+
+// Проверяет и снимает истёкший временный VIP у аккаунта. Вызывается при
+// логине и периодически (см. setInterval ниже, рядом с определением wss).
+async function revertExpiredTempVip(username, acc) {
+  if (!acc || !acc.vip_temp_until) return false;
+  if (acc.vip_temp_until > Date.now()) return false;
+  const prevRole = acc.vip_temp_prev_role || 'user';
+  acc.vip_temp_until = 0;
+  acc.vip_temp_prev_role = '';
+  // Если роль всё ещё 'vip' (т.е. никто не понизил/не повысил её вручную
+  // за это время) — возвращаем то, что было до выдачи временного статуса.
+  if (acc.role === 'vip') acc.role = prevRole;
+  try {
+    await dbSaveAccount(username, { vip_temp_until: 0, vip_temp_prev_role: '', role: acc.role });
+  } catch (_) {}
+  return true;
 }
 // checkAchievements(username, acc, opts) сама функция определена ниже,
 // внутри области видимости WebSocket-сервера (см. рядом с sendToUser) —
@@ -480,6 +539,11 @@ if (mongoose) {
     unlocked_achievements: { type: [String], default: [] },
     claimed_ranks:         { type: [String], default: [] },
     claimed_achievements:  { type: [String], default: [] },
+
+    // ── ВРЕМЕННЫЙ VIP (промежуточные звания-награды) ──
+    // См. grantTempVip/revertExpiredTempVip выше.
+    vip_temp_until:      { type: Number, default: 0 },
+    vip_temp_prev_role:  { type: String, default: '' },
   }, { timestamps: true, autoIndex: false });
 
   const ClanSchema = new mongoose.Schema({
@@ -583,6 +647,23 @@ if (Redis && process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_RES
 
 // ── DB HELPERS ─────────────────────────────────────────────
 async function dbGetAccount(username) {
+  // БАГ (жалоба "не забирается награда за ачивку"): раньше эта функция
+  // ВСЕГДА перезатирала accounts[username] свежим документом из MongoDB,
+  // даже если уже был живой in-memory аккаунт. accounts — источник
+  // правды в рантайме (checkAchievements/claim_achievement мутируют
+  // именно его), а запись в MongoDB асинхронная и не await'ится в
+  // горячих путях (например при постановке пикселя). Из-за этого
+  // возникала гонка: сервер помечал ачивку разблокированной в памяти и
+  // слал achievement_unlocked (кнопка "Забрать" появлялась), но ДО того
+  // как findOneAndUpdate успевал завершиться игрок жал "Забрать" →
+  // dbGetAccount дёргал Mongo, получал ЕЩЁ СТАРЫЙ документ без этой
+  // ачивки и перезаписывал им свежие in-memory данные — сервер отвечал
+  // "Ачивка ещё не выполнена", и кнопка переставала работать навсегда.
+  // Исправление: если аккаунт уже загружен в память — он и есть
+  // авторитетный источник, в БД за ним лезть не нужно. В Mongo идём
+  // только при первом обращении (например сразу после рестарта
+  // сервера), когда в памяти аккаунта ещё нет.
+  if (accounts[username]) return accounts[username];
   if (AccountModel) {
     try {
       const doc = await dbTimeout(AccountModel.findOne({ username }).lean().exec());
@@ -1394,6 +1475,24 @@ initDatabases().then(async () => {
     return findClientsByUsername(username).length > 0;
   }
 
+  // ── ИСТЕЧЕНИЕ ВРЕМЕННОГО VIP ──
+  // Пользователь может оставаться в сессии дольше, чем длится награда
+  // "VIP на N часов" (см. RANK_REWARDS 'Вдохновлённый'/'Зодчий'), поэтому
+  // нельзя полагаться только на проверку при логине — иначе роль 'vip'
+  // осталась бы навсегда, пока игрок не переподключится. Раз в минуту
+  // проверяем всех залогиненных сейчас пользователей и снимаем истёкший
+  // временный VIP, уведомляя их клиент, чтобы UI (значок VIP, доступ к
+  // VIP-предметам магазина) сразу обновился.
+  setInterval(async () => {
+    for (const c of wss.clients) {
+      if (c.readyState !== 1 || !c.isAuthorized || !c.userData) continue;
+      const reverted = await revertExpiredTempVip(c.userData.username, c.userData).catch(() => false);
+      if (reverted) {
+        c.send(JSON.stringify({ action: 'vip_status', role: c.userData.role, vip_temp_until: 0, message: '⌛ Временный VIP-статус закончился' }));
+      }
+    }
+  }, 60 * 1000);
+
   // Список всех сейчас залогиненных пользователей (дедуплицирован по username —
   // на случай нескольких открытых вкладок одного игрока).
   function getOnlineUsersSnapshot(excludeUsername) {
@@ -1786,6 +1885,9 @@ initDatabases().then(async () => {
               ws.userData.unlocked_achievements = ws.userData.unlocked_achievements || [];
               ws.userData.claimed_ranks = ws.userData.claimed_ranks || [];
               ws.userData.claimed_achievements = ws.userData.claimed_achievements || [];
+              ws.userData.vip_temp_until       = ws.userData.vip_temp_until       || 0;
+              ws.userData.vip_temp_prev_role   = ws.userData.vip_temp_prev_role   || '';
+              await revertExpiredTempVip(ws.userData.username, ws.userData);
               ws.userData.rank = getRank(ws.userData.xp).name;
 
               // Досчитываем задним числом уже выполненные ачивки (тихо, без тоста) —
@@ -1815,6 +1917,7 @@ initDatabases().then(async () => {
                 unlocked_achievements: ws.userData.unlocked_achievements || [],
                 claimed_ranks:         ws.userData.claimed_ranks || [],
                 claimed_achievements:  ws.userData.claimed_achievements || [],
+                vip_temp_until:  ws.userData.vip_temp_until || 0,
                 purchased_items: clientItems,
                 canvas_w:        CANVAS_WIDTH,
                 canvas_h:        CANVAS_HEIGHT,
@@ -1878,6 +1981,9 @@ initDatabases().then(async () => {
           ws.userData.unlocked_achievements = ws.userData.unlocked_achievements || [];
           ws.userData.claimed_ranks = ws.userData.claimed_ranks || [];
           ws.userData.claimed_achievements = ws.userData.claimed_achievements || [];
+          ws.userData.vip_temp_until       = ws.userData.vip_temp_until       || 0;
+          ws.userData.vip_temp_prev_role   = ws.userData.vip_temp_prev_role   || '';
+          await revertExpiredTempVip(ws.userData.username, ws.userData);
           ws.userData.rank = getRank(ws.userData.xp).name;
 
           // Досчитываем задним числом уже выполненные ачивки (тихо, без тоста).
@@ -1905,6 +2011,7 @@ initDatabases().then(async () => {
             unlocked_achievements: ws.userData.unlocked_achievements || [],
             claimed_ranks:         ws.userData.claimed_ranks || [],
             claimed_achievements:  ws.userData.claimed_achievements || [],
+            vip_temp_until:  ws.userData.vip_temp_until || 0,
             purchased_items: clientItems,
             canvas_w:  CANVAS_WIDTH,
             canvas_h:  CANVAS_HEIGHT,
@@ -2914,6 +3021,7 @@ initDatabases().then(async () => {
           let newOwnedBanners = acc.owned_banners || [];
           let newInventory    = acc.inventory || {};
           let grantedBanner   = null;
+          let vipUntil        = null;
 
           if (reward) {
             if (reward.type === 'coins') {
@@ -2923,15 +3031,24 @@ initDatabases().then(async () => {
               if (banner) { newOwnedBanners = [...newOwnedBanners, banner.id]; grantedBanner = banner; }
             } else if (reward.type === 'shop_item') {
               newInventory = { ...newInventory, [reward.itemId]: (newInventory[reward.itemId] || 0) + 1 };
+            } else if (reward.type === 'vip_temp') {
+              grantTempVip(acc, reward.hours);
+              vipUntil = acc.vip_temp_until;
             }
           }
 
           const newClaimedRanks = [...claimedRanks, rankName];
-          await dbSaveAccount(ws.userData.username, { coins: newCoins, owned_banners: newOwnedBanners, inventory: newInventory, claimed_ranks: newClaimedRanks });
+          await dbSaveAccount(ws.userData.username, {
+            coins: newCoins, owned_banners: newOwnedBanners, inventory: newInventory, claimed_ranks: newClaimedRanks,
+            role: acc.role, vip_temp_until: acc.vip_temp_until || 0, vip_temp_prev_role: acc.vip_temp_prev_role || '',
+          });
           ws.userData.coins         = newCoins;
           ws.userData.owned_banners = newOwnedBanners;
           ws.userData.inventory     = newInventory;
           ws.userData.claimed_ranks = newClaimedRanks;
+          ws.userData.role              = acc.role;
+          ws.userData.vip_temp_until    = acc.vip_temp_until || 0;
+          ws.userData.vip_temp_prev_role = acc.vip_temp_prev_role || '';
           if (accounts[ws.userData.username]) accounts[ws.userData.username].coins = newCoins;
 
           let clientItems = [...(ws.userData.upgrades || [])];
@@ -2941,11 +3058,13 @@ initDatabases().then(async () => {
           if (reward && reward.type === 'coins') message = `🎖️ Награда получена: +${reward.amount} 🪙`;
           else if (reward && reward.type === 'banner' && grantedBanner) message = `🎖️ Награда получена: баннер «${grantedBanner.name}»`;
           else if (reward && reward.type === 'shop_item') message = `🎖️ Награда получена: предмет из магазина`;
+          else if (reward && reward.type === 'vip_temp') message = `🎖️ Награда получена: VIP-статус на ${reward.hours} ${reward.hours === 1 ? 'час' : 'ч.'}`;
 
           ws.send(JSON.stringify({
             action: 'rank_reward_claimed', rank: rankName, reward, banner: grantedBanner,
             coins: newCoins, owned_banners: newOwnedBanners, purchased_items: clientItems,
             claimed_ranks: newClaimedRanks, message,
+            role: acc.role, vip_temp_until: vipUntil,
           }));
         }
 
