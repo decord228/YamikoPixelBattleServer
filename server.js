@@ -195,6 +195,20 @@ function getBannerById(id) {
   return PROFILE_BANNERS.find(b => b.id === id) || null;
 }
 
+// Случайный ещё не полученный баннер указанного тира — используется наградой
+// за звание (RANK_REWARDS: {type:'banner', tier}). Если игрок уже владеет
+// всеми баннерами тира — выдаём случайный из тира повторно (не блокируем
+// награду), просто ничего нового физически не добавится в owned_banners
+// (проверка на дубликат делает вызывающий код в claim_rank_reward).
+function pickRandomBannerReward(tier, ownedIds) {
+  const owned = new Set(ownedIds || []);
+  const pool = PROFILE_BANNERS.filter(b => b.tier === tier && b.cost > 0 && !owned.has(b.id));
+  const fallback = PROFILE_BANNERS.filter(b => b.tier === tier && b.cost > 0);
+  const list = pool.length ? pool : fallback;
+  if (!list.length) return null;
+  return list[Math.floor(Math.random() * list.length)];
+}
+
 function getOrCreateOwnerId(username, emoji, avatar) {
   if (ownerIdMap.has(username)) {
     // Обновим emoji/avatar на случай если пользователь их сменил
@@ -283,24 +297,67 @@ if (cloudinary && process.env.CLOUDINARY_CLOUD_NAME) {
 // ── COIN REWARDS ───────────────────────────────────────────
 const COINS_PER_PIXEL = 0.1;   // 1 монета за 10 пикселей
 
+// ── ЗВАНИЯ (Этап 4: переход на опыт) ──
+// min теперь измеряется в очках ОПЫТА (xp), а не в пикселях. 1 поставленный
+// пиксель = 1 xp (начисляется автоматически, см. обработчик 'pixel' ниже).
+// Дополнительный xp даёт получение ачивок — но ТОЛЬКО после того как игрок
+// заберёт награду за ачивку кнопкой (см. action:'claim_achievement').
+// Список должен 1-в-1 совпадать (имена/иконки/пороги) с RANKS в config.js.
 const RANK_THRESHOLDS = [
-  { name:'Новичок',       icon:'🌱', min:0 },
-  { name:'Художник',      icon:'🎨', min:50 },
-  { name:'Маэстро',       icon:'🖌️', min:200 },
-  { name:'Легенда',       icon:'⭐', min:1000 },
-  { name:'Архитектор',    icon:'🏛️', min:5000 },
-  { name:'Бог Пикселей',  icon:'👑', min:20000 },
+  { name:'Новичок',            icon:'🌱', min:0 },
+  { name:'Ученик',             icon:'🖍️', min:50 },
+  { name:'Художник',           icon:'🎨', min:150 },
+  { name:'Подмастерье',        icon:'🧵', min:350 },
+  { name:'Маэстро',            icon:'🖌️', min:700 },
+  { name:'Виртуоз',            icon:'🎭', min:1200 },
+  { name:'Легенда',            icon:'⭐', min:2000 },
+  { name:'Чемпион',            icon:'🏆', min:3000 },
+  { name:'Мастер Цвета',       icon:'🌈', min:4200 },
+  { name:'Хранитель Холста',   icon:'🛡️', min:5800 },
+  { name:'Архитектор',         icon:'🏛️', min:7800 },
+  { name:'Творец Миров',       icon:'🌍', min:10200 },
+  { name:'Провидец',           icon:'🔮', min:13000 },
+  { name:'Император Пикселей', icon:'👁️', min:16200 },
+  { name:'Небожитель',         icon:'🌠', min:18500 },
+  { name:'Бог Пикселей',       icon:'👑', min:20000 },
 ];
 
-function getRank(pixels) {
-  return [...RANK_THRESHOLDS].reverse().find(r => pixels >= r.min) || RANK_THRESHOLDS[0];
+function getRank(xp) {
+  return [...RANK_THRESHOLDS].reverse().find(r => xp >= r.min) || RANK_THRESHOLDS[0];
 }
 
-// Награда монетами за достижение нового звания (выдаётся один раз, в момент
-// пересечения порога пикселей). Ключи — имена из RANK_THRESHOLDS, значения
-// ДОЛЖНЫ совпадать с RANK_REWARDS в config.js (используется там только для
-// отображения бейджа награды в прогресс-баре звания).
-const RANK_REWARDS = { 'Новичок':0, 'Художник':20, 'Маэстро':60, 'Легенда':200, 'Архитектор':500, 'Бог Пикселей':2000 };
+// Награда за достижение звания — больше НЕ выдаётся автоматически.
+// Сервер лишь считает награду "доступной к получению", как только
+// acc.xp >= порога звания и звания ещё нет в acc.claimed_ranks — реальную
+// выдачу делает action:'claim_rank_reward' (игрок жмёт кнопку "Забрать").
+// Три типа наград:
+//   {type:'coins', amount}      — монеты
+//   {type:'banner', tier}       — случайный ещё не полученный баннер из
+//                                  каталога PROFILE_BANNERS указанного тира
+//                                  ('free'|'gradient'|'animated'), см.
+//                                  pickRandomBannerReward() ниже
+//   {type:'shop_item', itemId}  — предмет магазина, кладётся в inventory
+// Баланс по просьбе заказчика: сначала простые одноцветные баннеры, затем
+// градиенты, после половины списка — анимированные + товары магазина.
+// Ключи ДОЛЖНЫ совпадать 1-в-1 с RANK_REWARDS в config.js.
+const RANK_REWARDS = {
+  'Новичок':            null,
+  'Ученик':             { type:'coins',     amount:15 },
+  'Художник':           { type:'coins',     amount:20 },
+  'Подмастерье':        { type:'banner',    tier:'free' },
+  'Маэстро':            { type:'coins',     amount:60 },
+  'Виртуоз':            { type:'banner',    tier:'free' },
+  'Легенда':            { type:'banner',    tier:'gradient' },
+  'Чемпион':            { type:'coins',     amount:150 },
+  'Мастер Цвета':       { type:'banner',    tier:'gradient' },
+  'Хранитель Холста':   { type:'shop_item', itemId:'cooldown_boost_25' },
+  'Архитектор':         { type:'coins',     amount:500 },
+  'Творец Миров':       { type:'banner',    tier:'animated' },
+  'Провидец':           { type:'shop_item', itemId:'cooldown_boost_50' },
+  'Император Пикселей': { type:'banner',    tier:'animated' },
+  'Небожитель':         { type:'coins',     amount:1000 },
+  'Бог Пикселей':       { type:'coins',     amount:2000 },
+};
 
 // ── АЧИВКИ (server-side источник правды) ──────────────────
 // Зеркало ACHIEVEMENTS из config.js + награда опытом (xp). Живёт отдельно от
@@ -308,12 +365,12 @@ const RANK_REWARDS = { 'Новичок':0, 'Художник':20, 'Маэстр�
 // stats считается из уже существующих полей аккаунта — новых полей в БД
 // требуется всего два: xp (number) и unlocked_achievements (string[]).
 const ACHIEVEMENTS_DEF = [
-  { id:'first_pixel',    title:'Первый мазок',       icon:'🖌️', xp:10,  check: s => s.pixels >= 1 },
-  { id:'pixels_50',      title:'Начинающий',         icon:'🌱', xp:20,  check: s => s.pixels >= 50 },
-  { id:'pixels_200',     title:'Художник',           icon:'🎨', xp:40,  check: s => s.pixels >= 200 },
-  { id:'pixels_1000',    title:'Легенда',            icon:'⭐', xp:80,  check: s => s.pixels >= 1000 },
-  { id:'pixels_5000',    title:'Архитектор',         icon:'🏛️', xp:150, check: s => s.pixels >= 5000 },
-  { id:'pixels_20000',   title:'Бог Пикселей',       icon:'👑', xp:300, check: s => s.pixels >= 20000 },
+  { id:'first_pixel',    title:'Первый мазок',       icon:'🖌️', xp:10,  check: s => s.xp >= 1 },
+  { id:'pixels_50',      title:'Начинающий',         icon:'🌱', xp:20,  check: s => s.xp >= 50 },
+  { id:'pixels_200',     title:'Художник',           icon:'🎨', xp:40,  check: s => s.xp >= 200 },
+  { id:'pixels_1000',    title:'Легенда',            icon:'⭐', xp:80,  check: s => s.xp >= 1000 },
+  { id:'pixels_5000',    title:'Архитектор',         icon:'🏛️', xp:150, check: s => s.xp >= 5000 },
+  { id:'pixels_20000',   title:'Бог Пикселей',       icon:'👑', xp:300, check: s => s.xp >= 20000 },
   { id:'coins_500',      title:'Коллекционер',       icon:'🪙', xp:30,  check: s => s.coins >= 500 },
   { id:'coins_5000',     title:'Магнат',             icon:'💰', xp:100, check: s => s.coins >= 5000 },
   { id:'first_purchase', title:'Первая покупка',     icon:'🛒', xp:15,  check: s => s.purchasedCount > 0 },
@@ -332,6 +389,7 @@ function buildAchievementStats(acc) {
     Object.values(acc.inventory || {}).reduce((a, b) => a + b, 0);
   return {
     pixels: acc.pixels || 0,
+    xp: acc.xp || 0,
     coins: acc.coins || 0,
     clan: acc.clan || '',
     purchasedCount,
@@ -411,6 +469,17 @@ if (mongoose) {
     // owned_banners навсегда.
     banner_id:           { type: String,   default: null },
     owned_banners:       { type: [String], default: [] },
+
+    // ── ОПЫТ / ЗВАНИЯ / АЧИВКИ (Этап 4) ──
+    // xp — суммарный опыт (1 пиксель = 1xp автоматически + xp ачивок ПОСЛЕ
+    // того как игрок их забрал). unlocked_achievements — id ачивок, условие
+    // которых уже выполнено (используется для отображения статуса и
+    // возможности забрать). claimed_ranks/claimed_achievements — что из
+    // доступных наград уже реально забрано (защита от повторного получения).
+    xp:                    { type: Number,   default: 0 },
+    unlocked_achievements: { type: [String], default: [] },
+    claimed_ranks:         { type: [String], default: [] },
+    claimed_achievements:  { type: [String], default: [] },
   }, { timestamps: true, autoIndex: false });
 
   const ClanSchema = new mongoose.Schema({
@@ -1066,7 +1135,7 @@ setInterval(async () => {
     const batch = Array.from(dirtyAccounts); dirtyAccounts.clear();
     for (const username of batch) {
       if (accounts[username]) {
-        try { await dbSaveAccount(username, { pixels: accounts[username].pixels, coins: accounts[username].coins, rank: accounts[username].rank, inventory: accounts[username].inventory }); } catch(e) {}
+        try { await dbSaveAccount(username, { pixels: accounts[username].pixels, coins: accounts[username].coins, rank: accounts[username].rank, xp: accounts[username].xp, inventory: accounts[username].inventory }); } catch(e) {}
       }
     }
   }
@@ -1296,11 +1365,13 @@ initDatabases().then(async () => {
     }
     if (!newly.length) return;
     acc.unlocked_achievements = Array.from(already);
-    acc.xp = (acc.xp || 0) + newly.reduce((s, a) => s + (a.xp || 0), 0);
-    try { await dbSaveAccount(username, { unlocked_achievements: acc.unlocked_achievements, xp: acc.xp }); } catch (_) {}
+    // Опыт (a.xp) больше НЕ начисляется тут автоматически — условие ачивки
+    // просто становится "доступно к получению". Игрок сам жмёт "Забрать" в
+    // профиле → action:'claim_achievement' ниже, который и добавляет xp.
+    try { await dbSaveAccount(username, { unlocked_achievements: acc.unlocked_achievements }); } catch (_) {}
     if (!silent) {
       for (const a of newly) {
-        sendToUser(username, { action: 'achievement_unlocked', id: a.id, title: a.title, icon: a.icon, xp: a.xp });
+        sendToUser(username, { action: 'achievement_unlocked', id: a.id, title: a.title, icon: a.icon, xp: a.xp, claimable: true });
       }
     }
   }
@@ -1591,18 +1662,15 @@ initDatabases().then(async () => {
           const prevRank  = acc.rank;
           acc.pixels = (acc.pixels || 0) + 1;
           acc.coins = (acc.coins || 0) + COINS_PER_PIXEL;
-          acc.rank  = getRank(acc.pixels).name;
+          // 1 пиксель = 1 очко опыта (xp), начисляется всегда автоматически.
+          // Звание (rank) — это просто текущий уровень по xp, пересчитывается
+          // мгновенно. САМА награда за звание (монеты/баннер/предмет) больше
+          // НЕ выдаётся тут — игрок получает её кнопкой "Забрать" в модалке
+          // "Звания и награды" (см. action:'claim_rank_reward' ниже).
+          acc.xp    = (acc.xp || 0) + 1;
+          acc.rank  = getRank(acc.xp).name;
 
-          // ── Награда за новое звание ──
-          // Пересекли порог пикселей нового звания — начисляем монеты один раз,
-          // прямо в акк (попадёт в тот же батч-сейв ниже, доп. запись в БД не нужна).
-          let rankUpReward = 0;
-          if (acc.rank !== prevRank) {
-            rankUpReward = RANK_REWARDS[acc.rank] || 0;
-            if (rankUpReward > 0) acc.coins += rankUpReward;
-          }
-
-          accounts[acc.username] = { ...accounts[acc.username], pixels: acc.pixels, coins: acc.coins, rank: acc.rank };
+          accounts[acc.username] = { ...accounts[acc.username], pixels: acc.pixels, coins: acc.coins, rank: acc.rank, xp: acc.xp };
           dirtyAccounts.add(acc.username);
 
           if (acc.clan) {
@@ -1611,9 +1679,10 @@ initDatabases().then(async () => {
             dirtyClans.add(acc.clan);
           }
 
-          if (rankUpReward > 0) {
-            const rankInfo = getRank(acc.pixels);
-            ws.send(JSON.stringify({ action: 'rank_up', rank: acc.rank, icon: rankInfo.icon, coins: rankUpReward }));
+          if (acc.rank !== prevRank) {
+            const rankInfo = getRank(acc.xp);
+            const hasReward = !!RANK_REWARDS[acc.rank];
+            ws.send(JSON.stringify({ action: 'rank_up', rank: acc.rank, icon: rankInfo.icon, xp: acc.xp, claimable: hasReward }));
           }
 
           if (Math.floor(acc.coins) > Math.floor(prevCoins)) {
@@ -1681,6 +1750,8 @@ initDatabases().then(async () => {
                   owned_banners:       [],
                   xp:                  0,
                   unlocked_achievements: [],
+                  claimed_ranks:         [],
+                  claimed_achievements:  [],
                 };
                 await dbSaveAccount(username, acc);
               } else {
@@ -1713,6 +1784,9 @@ initDatabases().then(async () => {
               ws.userData.owned_banners        = ws.userData.owned_banners        || [];
               ws.userData.xp                   = ws.userData.xp                   || 0;
               ws.userData.unlocked_achievements = ws.userData.unlocked_achievements || [];
+              ws.userData.claimed_ranks = ws.userData.claimed_ranks || [];
+              ws.userData.claimed_achievements = ws.userData.claimed_achievements || [];
+              ws.userData.rank = getRank(ws.userData.xp).name;
 
               // Досчитываем задним числом уже выполненные ачивки (тихо, без тоста) —
               // важно, например, для игроков, залогинившихся впервые после
@@ -1739,6 +1813,8 @@ initDatabases().then(async () => {
                 clan:            ws.userData.clan      || '',
                 xp:              ws.userData.xp        || 0,
                 unlocked_achievements: ws.userData.unlocked_achievements || [],
+                claimed_ranks:         ws.userData.claimed_ranks || [],
+                claimed_achievements:  ws.userData.claimed_achievements || [],
                 purchased_items: clientItems,
                 canvas_w:        CANVAS_WIDTH,
                 canvas_h:        CANVAS_HEIGHT,
@@ -1776,7 +1852,7 @@ initDatabases().then(async () => {
             if (existing) { ws.send(JSON.stringify({ action:'toast', message:'Ник уже занят!' })); return; }
             let role = 'user';
             if ((username === 'd3cord' && email === 'otarasik10@gmail.com') || username === ADMIN_USERNAME) role = 'admin';
-            const newUser = { username, password, email, role, pixels: 0, rank: 'Новичок', emoji: '👾', banned: false, timeout_until: 0, coins: 0, clan: '', inventory: {}, upgrades: [], active_stencil: null, saved_stencils: [], friends: [], friend_requests_in: [], friend_requests_out: [], dm_reads: {}, banner_id: null, owned_banners: [], xp: 0, unlocked_achievements: [] };
+            const newUser = { username, password, email, role, pixels: 0, rank: 'Новичок', emoji: '👾', banned: false, timeout_until: 0, coins: 0, clan: '', inventory: {}, upgrades: [], active_stencil: null, saved_stencils: [], friends: [], friend_requests_in: [], friend_requests_out: [], dm_reads: {}, banner_id: null, owned_banners: [], xp: 0, unlocked_achievements: [], claimed_ranks: [], claimed_achievements: [] };
             await dbSaveAccount(username, newUser);
             ws.userData = { ...newUser };
           } else {
@@ -1800,6 +1876,9 @@ initDatabases().then(async () => {
           ws.userData.owned_banners        = ws.userData.owned_banners        || [];
           ws.userData.xp                   = ws.userData.xp                   || 0;
           ws.userData.unlocked_achievements = ws.userData.unlocked_achievements || [];
+          ws.userData.claimed_ranks = ws.userData.claimed_ranks || [];
+          ws.userData.claimed_achievements = ws.userData.claimed_achievements || [];
+          ws.userData.rank = getRank(ws.userData.xp).name;
 
           // Досчитываем задним числом уже выполненные ачивки (тихо, без тоста).
           checkAchievements(ws.userData.username, ws.userData, { silent: true }).catch(() => {});
@@ -1824,6 +1903,8 @@ initDatabases().then(async () => {
             clan:      ws.userData.clan      || '',
             xp:              ws.userData.xp        || 0,
             unlocked_achievements: ws.userData.unlocked_achievements || [],
+            claimed_ranks:         ws.userData.claimed_ranks || [],
+            claimed_achievements:  ws.userData.claimed_achievements || [],
             purchased_items: clientItems,
             canvas_w:  CANVAS_WIDTH,
             canvas_h:  CANVAS_HEIGHT,
@@ -2811,6 +2892,95 @@ initDatabases().then(async () => {
           if (ws.userData.clan) broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_data', clan: await dbGetClan(ws.userData.clan) }), null);
         }
 
+        // ── ЗАБРАТЬ НАГРАДУ ЗА ЗВАНИЕ (Этап 4) ──
+        // Игрок жмёт кнопку "Забрать" в модалке "Звания и награды" на уже
+        // достигнутом (по xp) звании. Проверяем порог, проверяем что ещё не
+        // забирали, выдаём согласно RANK_REWARDS и помечаем звание забранным.
+        else if (action === 'claim_rank_reward') {
+          if (!ws.isAuthorized) return;
+          const rankName = String(data.rank || '');
+          const rankDef  = RANK_THRESHOLDS.find(r => r.name === rankName);
+          if (!rankDef) { ws.send(JSON.stringify({ action:'toast', message:'Звание не найдено' })); return; }
+
+          const acc = await dbGetAccount(ws.userData.username);
+          const xp  = acc.xp || 0;
+          if (xp < rankDef.min) { ws.send(JSON.stringify({ action:'toast', message:'Это звание ещё не достигнуто' })); return; }
+
+          const claimedRanks = acc.claimed_ranks || [];
+          if (claimedRanks.includes(rankName)) { ws.send(JSON.stringify({ action:'toast', message:'Награда уже получена' })); return; }
+
+          const reward = RANK_REWARDS[rankName];
+          let newCoins     = acc.coins || 0;
+          let newOwnedBanners = acc.owned_banners || [];
+          let newInventory    = acc.inventory || {};
+          let grantedBanner   = null;
+
+          if (reward) {
+            if (reward.type === 'coins') {
+              newCoins += reward.amount;
+            } else if (reward.type === 'banner') {
+              const banner = pickRandomBannerReward(reward.tier, newOwnedBanners);
+              if (banner) { newOwnedBanners = [...newOwnedBanners, banner.id]; grantedBanner = banner; }
+            } else if (reward.type === 'shop_item') {
+              newInventory = { ...newInventory, [reward.itemId]: (newInventory[reward.itemId] || 0) + 1 };
+            }
+          }
+
+          const newClaimedRanks = [...claimedRanks, rankName];
+          await dbSaveAccount(ws.userData.username, { coins: newCoins, owned_banners: newOwnedBanners, inventory: newInventory, claimed_ranks: newClaimedRanks });
+          ws.userData.coins         = newCoins;
+          ws.userData.owned_banners = newOwnedBanners;
+          ws.userData.inventory     = newInventory;
+          ws.userData.claimed_ranks = newClaimedRanks;
+          if (accounts[ws.userData.username]) accounts[ws.userData.username].coins = newCoins;
+
+          let clientItems = [...(ws.userData.upgrades || [])];
+          for (const k in newInventory) { for (let i = 0; i < newInventory[k]; i++) clientItems.push(k); }
+
+          let message = `🎖️ Звание «${rankName}» подтверждено`;
+          if (reward && reward.type === 'coins') message = `🎖️ Награда получена: +${reward.amount} 🪙`;
+          else if (reward && reward.type === 'banner' && grantedBanner) message = `🎖️ Награда получена: баннер «${grantedBanner.name}»`;
+          else if (reward && reward.type === 'shop_item') message = `🎖️ Награда получена: предмет из магазина`;
+
+          ws.send(JSON.stringify({
+            action: 'rank_reward_claimed', rank: rankName, reward, banner: grantedBanner,
+            coins: newCoins, owned_banners: newOwnedBanners, purchased_items: clientItems,
+            claimed_ranks: newClaimedRanks, message,
+          }));
+        }
+
+        // ── ЗАБРАТЬ НАГРАДУ ЗА АЧИВКУ (Этап 4) ──
+        // Условие ачивки уже выполнено (acc.unlocked_achievements), но опыт
+        // за неё начисляется только тут, по клику "Забрать".
+        else if (action === 'claim_achievement') {
+          if (!ws.isAuthorized) return;
+          const id  = String(data.id || '');
+          const def = ACHIEVEMENTS_DEF.find(a => a.id === id);
+          if (!def) { ws.send(JSON.stringify({ action:'toast', message:'Ачивка не найдена' })); return; }
+
+          const acc = await dbGetAccount(ws.userData.username);
+          const unlocked = acc.unlocked_achievements || [];
+          if (!unlocked.includes(id)) { ws.send(JSON.stringify({ action:'toast', message:'Ачивка ещё не выполнена' })); return; }
+
+          const claimedAch = acc.claimed_achievements || [];
+          if (claimedAch.includes(id)) { ws.send(JSON.stringify({ action:'toast', message:'Награда уже получена' })); return; }
+
+          const newXp   = (acc.xp || 0) + (def.xp || 0);
+          const newRank = getRank(newXp).name;
+          const newClaimedAch = [...claimedAch, id];
+
+          await dbSaveAccount(ws.userData.username, { xp: newXp, rank: newRank, claimed_achievements: newClaimedAch });
+          ws.userData.xp = newXp;
+          ws.userData.rank = newRank;
+          ws.userData.claimed_achievements = newClaimedAch;
+          if (accounts[ws.userData.username]) { accounts[ws.userData.username].xp = newXp; accounts[ws.userData.username].rank = newRank; }
+
+          ws.send(JSON.stringify({
+            action: 'achievement_claimed', id, xp: def.xp, newXp, rank: newRank,
+            claimed_achievements: newClaimedAch, message: `✨ Получено +${def.xp} опыта за «${def.title}»`,
+          }));
+        }
+
         // ══════════════════════════════════════════════════
         //  ADMIN COMMANDS
         // ══════════════════════════════════════════════════
@@ -2934,11 +3104,16 @@ initDatabases().then(async () => {
             const newPixels = Math.max(0, parseInt(data.params) || 0);
             const acc = await dbGetAccount(data.target);
             if (acc) {
-              const newRank = getRank(newPixels).name;
-              await dbSaveAccount(data.target, { pixels: newPixels, rank: newRank });
+              // Ранг теперь считается от xp, а не от pixels — при ручной
+              // установке пикселей админом синхронизируем xp тем же числом,
+              // чтобы звание игрока осталось предсказуемым.
+              const newXp   = newPixels;
+              const newRank = getRank(newXp).name;
+              await dbSaveAccount(data.target, { pixels: newPixels, xp: newXp, rank: newRank });
               wss.clients.forEach(c => {
                 if (c.isAuthorized && c.userData?.username === data.target) {
                   c.userData.pixels = newPixels;
+                  c.userData.xp = newXp;
                   c.userData.rank = newRank;
                   c.send(JSON.stringify({ action:'coins_update', coins: c.userData.coins||0, pixels: newPixels }));
                 }
