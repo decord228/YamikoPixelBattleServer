@@ -68,8 +68,8 @@ function getAvatarUrl(acc) {
 //                (поле css — просто hex, БЕЗ градиента). Раньше здесь по
 //                ошибке лежали градиенты — перепутали с платным тиром,
 //                см. запись в REWORK_PLAN про фикс этого места.
-//   'gradient' — CSS-градиент (поле css), фиксированная цена 10 монет
-//                (ТЗ: "за 10 монет ставить градиент баннеры профиля") —
+//   'gradient' — CSS-градиент (поле css), фиксированная цена 20 монет
+//                (цена удвоена по просьбе заказчика от изначальных 10) —
 //                НЕ 150-200, это была та же путаница со свободным тиром.
 //   'animated' — анимированный баннер, 100-1000 монет по сложности/красоте
 //                (ТЗ: "простенькие" от 100 до "сложные" 1000). Два источника
@@ -96,15 +96,15 @@ const PROFILE_BANNERS_BUILTIN = [
   { id:'banner_c_purple',tier:'free', name:'Пурпурный',     cost:3,  css:'#811e9f' },
   { id:'banner_c_pink',  tier:'free', name:'Розовый',       cost:3,  css:'#ff6392' },
 
-  { id:'banner_sunset',  tier:'gradient', name:'Закат',    cost:10, css:'linear-gradient(135deg,#ff9600,#d40078)' },
-  { id:'banner_ocean',   tier:'gradient', name:'Океан',    cost:10, css:'linear-gradient(135deg,#00756f,#2450a4)' },
-  { id:'banner_forest',  tier:'gradient', name:'Лес',      cost:10, css:'linear-gradient(135deg,#006030,#7eed56)' },
-  { id:'banner_royal',   tier:'gradient', name:'Аметист',  cost:10, css:'linear-gradient(135deg,#493ac1,#b44ac0)' },
-  { id:'banner_flame',   tier:'gradient', name:'Пламя',    cost:10, css:'linear-gradient(135deg,#8a0022,#ff9600)' },
-  { id:'banner_mint',    tier:'gradient', name:'Мята',     cost:10, css:'linear-gradient(135deg,#00a368,#51e9f4)' },
-  { id:'banner_candy',   tier:'gradient', name:'Малина',   cost:10, css:'linear-gradient(135deg,#d40078,#ff99aa)' },
-  { id:'banner_slate_g', tier:'gradient', name:'Графит',   cost:10, css:'linear-gradient(135deg,#1a1a1a,#3a3a3a)' },
-  { id:'banner_indigo_g',tier:'gradient', name:'Индиго',   cost:10, css:'linear-gradient(135deg,#1d2b53,#493ac1)' },
+  { id:'banner_sunset',  tier:'gradient', name:'Закат',    cost:20, css:'linear-gradient(135deg,#ff9600,#d40078)' },
+  { id:'banner_ocean',   tier:'gradient', name:'Океан',    cost:20, css:'linear-gradient(135deg,#00756f,#2450a4)' },
+  { id:'banner_forest',  tier:'gradient', name:'Лес',      cost:20, css:'linear-gradient(135deg,#006030,#7eed56)' },
+  { id:'banner_royal',   tier:'gradient', name:'Аметист',  cost:20, css:'linear-gradient(135deg,#493ac1,#b44ac0)' },
+  { id:'banner_flame',   tier:'gradient', name:'Пламя',    cost:20, css:'linear-gradient(135deg,#8a0022,#ff9600)' },
+  { id:'banner_mint',    tier:'gradient', name:'Мята',     cost:20, css:'linear-gradient(135deg,#00a368,#51e9f4)' },
+  { id:'banner_candy',   tier:'gradient', name:'Малина',   cost:20, css:'linear-gradient(135deg,#d40078,#ff99aa)' },
+  { id:'banner_slate_g', tier:'gradient', name:'Графит',   cost:20, css:'linear-gradient(135deg,#1a1a1a,#3a3a3a)' },
+  { id:'banner_indigo_g',tier:'gradient', name:'Индиго',   cost:20, css:'linear-gradient(135deg,#1d2b53,#493ac1)' },
 ];
 
 // Встроенные анимированные баннеры (CSS keyframes, см. .pbanner-anim-* в
@@ -112,11 +112,11 @@ const PROFILE_BANNERS_BUILTIN = [
 // с анимацией, `css` — фон под ней (градиент/цвет, участвует в кадрах).
 // Цена растёт по числу "слоёв"/сложности анимации, как просил заказчик.
 const PROFILE_BANNERS_ANIMATED_CSS = [
-  { id:'banner_a_pulse',    tier:'animated', name:'Пульс',        cost:60,   anim:'pbanner-anim-pulse',    css:'linear-gradient(135deg,#493ac1,#3690ea)' },
-  { id:'banner_a_tide',     tier:'animated', name:'Прилив',       cost:75,   anim:'pbanner-anim-tide',     css:'linear-gradient(120deg,#00756f,#2450a4,#00756f)' },
-  { id:'banner_a_aurora',   tier:'animated', name:'Аврора',       cost:135,  anim:'pbanner-anim-aurora',   css:'linear-gradient(120deg,#006030,#493ac1,#d40078,#006030)' },
-  { id:'banner_a_stardust', tier:'animated', name:'Звёздная пыль',cost:210,  anim:'pbanner-anim-stardust', css:'linear-gradient(135deg,#0a0a14,#1d2b53)' },
-  { id:'banner_a_rainbow',  tier:'animated', name:'Радуга',       cost:300,  anim:'pbanner-anim-rainbow',  css:'linear-gradient(90deg,#e40000,#ff9600,#ffd635,#00a368,#2450a4,#811e9f,#e40000)' },
+  { id:'banner_a_pulse',    tier:'animated', name:'Пульс',        cost:120,   anim:'pbanner-anim-pulse',    css:'linear-gradient(135deg,#493ac1,#3690ea)' },
+  { id:'banner_a_tide',     tier:'animated', name:'Прилив',       cost:150,   anim:'pbanner-anim-tide',     css:'linear-gradient(120deg,#00756f,#2450a4,#00756f)' },
+  { id:'banner_a_aurora',   tier:'animated', name:'Аврора',       cost:270,  anim:'pbanner-anim-aurora',   css:'linear-gradient(120deg,#006030,#493ac1,#d40078,#006030)' },
+  { id:'banner_a_stardust', tier:'animated', name:'Звёздная пыль',cost:420,  anim:'pbanner-anim-stardust', css:'linear-gradient(135deg,#0a0a14,#1d2b53)' },
+  { id:'banner_a_rainbow',  tier:'animated', name:'Радуга',       cost:600,  anim:'pbanner-anim-rainbow',  css:'linear-gradient(90deg,#e40000,#ff9600,#ffd635,#00a368,#2450a4,#811e9f,#e40000)' },
 ];
 
 // ── ГЕОМЕТРИЧЕСКИЕ БАННЕРЫ (Этап 2, доп. заказ заказчика: +6 баннеров) ──
@@ -128,12 +128,12 @@ const PROFILE_BANNERS_ANIMATED_CSS = [
 // gradient вместо background-position анимации) — см. .pbanner-geo-* в
 // style.css. Цены по той же логике сложности/красоты (100–1000).
 const PROFILE_BANNERS_GEOMETRIC = [
-  { id:'banner_g_hex',      tier:'animated', name:'Соты',             cost:105, anim:'pbanner-geo-hex',      css:'linear-gradient(120deg,#050308,#12081f,#2b1030,#12081f,#050308)' },
-  { id:'banner_g_triangle', tier:'animated', name:'Триангуляция',     cost:75,  anim:'pbanner-geo-triangle', css:'#1d2b53' },
-  { id:'banner_g_stripes',  tier:'animated', name:'Диагонали',        cost:60,  anim:'pbanner-geo-stripes',  css:'#2b1e3e' },
-  { id:'banner_g_rings',    tier:'animated', name:'Радар',            cost:105, anim:'pbanner-geo-rings',    css:'#0a0a14' },
-  { id:'banner_g_dots',     tier:'animated', name:'Пиксельная сетка', cost:60,  anim:'pbanner-geo-dots',     css:'#1a1a1a' },
-  { id:'banner_g_bolt',     tier:'animated', name:'Молния',           cost:120, anim:'pbanner-geo-bolt',     css:'#1d2b53' },
+  { id:'banner_g_hex',      tier:'animated', name:'Соты',             cost:210, anim:'pbanner-geo-hex',      css:'linear-gradient(120deg,#050308,#12081f,#2b1030,#12081f,#050308)' },
+  { id:'banner_g_triangle', tier:'animated', name:'Триангуляция',     cost:150,  anim:'pbanner-geo-triangle', css:'#1d2b53' },
+  { id:'banner_g_stripes',  tier:'animated', name:'Диагонали',        cost:120,  anim:'pbanner-geo-stripes',  css:'#2b1e3e' },
+  { id:'banner_g_rings',    tier:'animated', name:'Радар',            cost:210, anim:'pbanner-geo-rings',    css:'#0a0a14' },
+  { id:'banner_g_dots',     tier:'animated', name:'Пиксельная сетка', cost:120,  anim:'pbanner-geo-dots',     css:'#1a1a1a' },
+  { id:'banner_g_bolt',     tier:'animated', name:'Молния',           cost:240, anim:'pbanner-geo-bolt',     css:'#1d2b53' },
 ];
 
 // ── ПРЕМИУМ-БАННЕРЫ (Этап 3, доп. заказ: "больше сложности, шедевры") ──
@@ -142,15 +142,15 @@ const PROFILE_BANNERS_GEOMETRIC = [
 // пастельная эстетика ("пикми") — как просил заказчик. Цены — по
 // визуальной сложности (350 — простейшие частицы, 950 — самые многослойные).
 const PROFILE_BANNERS_PREMIUM = [
-  { id:'banner_p_starfield',     tier:'animated', name:'Звёздное небо',   cost:135, anim:'pbanner-prem-starfield',     css:'linear-gradient(160deg,#05050f,#1d2b53,#05050f)' },
-  { id:'banner_p_galaxy',        tier:'animated', name:'Галактика',       cost:270, anim:'pbanner-prem-galaxy',        css:'radial-gradient(circle at 50% 50%,#1d0f30,#05050a 70%)' },
-  { id:'banner_p_sakura',        tier:'animated', name:'Сакура',          cost:150, anim:'pbanner-prem-sakura',        css:'linear-gradient(160deg,#ffd6e8,#ff9ec4,#6a3a7a)' },
-  { id:'banner_p_pikmi',         tier:'animated', name:'Пикми',           cost:120, anim:'pbanner-prem-pikmi',         css:'linear-gradient(135deg,#ffd6f0,#c8b6ff,#b6f0ff,#ffe9b6)' },
-  { id:'banner_p_matrix',        tier:'animated', name:'Матрица',         cost:135, anim:'pbanner-prem-matrix',        css:'#040a04' },
-  { id:'banner_p_supernova',     tier:'animated', name:'Сверхновая',      cost:210, anim:'pbanner-prem-supernova',     css:'radial-gradient(circle at 50% 50%,#2b1000,#05050a 75%)' },
-  { id:'banner_p_lava',          tier:'animated', name:'Лава',            cost:165, anim:'pbanner-prem-lava',          css:'linear-gradient(160deg,#1a0505,#3a0a0a)' },
-  { id:'banner_p_ocean_deep',    tier:'animated', name:'Глубина океана',  cost:180, anim:'pbanner-prem-ocean',         css:'linear-gradient(180deg,#00343a,#001a20)' },
-  { id:'banner_p_constellation', tier:'animated', name:'Созвездие',       cost:285, anim:'pbanner-prem-constellation', css:'linear-gradient(160deg,#05050f,#0d1230,#05050f)' },
+  { id:'banner_p_starfield',     tier:'animated', name:'Звёздное небо',   cost:270, anim:'pbanner-prem-starfield',     css:'linear-gradient(160deg,#05050f,#1d2b53,#05050f)' },
+  { id:'banner_p_galaxy',        tier:'animated', name:'Галактика',       cost:540, anim:'pbanner-prem-galaxy',        css:'radial-gradient(circle at 50% 50%,#1d0f30,#05050a 70%)' },
+  { id:'banner_p_sakura',        tier:'animated', name:'Сакура',          cost:300, anim:'pbanner-prem-sakura',        css:'linear-gradient(160deg,#ffd6e8,#ff9ec4,#6a3a7a)' },
+  { id:'banner_p_pikmi',         tier:'animated', name:'Пикми',           cost:240, anim:'pbanner-prem-pikmi',         css:'linear-gradient(135deg,#ffd6f0,#c8b6ff,#b6f0ff,#ffe9b6)' },
+  { id:'banner_p_matrix',        tier:'animated', name:'Матрица',         cost:270, anim:'pbanner-prem-matrix',        css:'#040a04' },
+  { id:'banner_p_supernova',     tier:'animated', name:'Сверхновая',      cost:420, anim:'pbanner-prem-supernova',     css:'radial-gradient(circle at 50% 50%,#2b1000,#05050a 75%)' },
+  { id:'banner_p_lava',          tier:'animated', name:'Лава',            cost:330, anim:'pbanner-prem-lava',          css:'linear-gradient(160deg,#1a0505,#3a0a0a)' },
+  { id:'banner_p_ocean_deep',    tier:'animated', name:'Глубина океана',  cost:360, anim:'pbanner-prem-ocean',         css:'linear-gradient(180deg,#00343a,#001a20)' },
+  { id:'banner_p_constellation', tier:'animated', name:'Созвездие',       cost:570, anim:'pbanner-prem-constellation', css:'linear-gradient(160deg,#05050f,#0d1230,#05050f)' },
 ];
 
 const BANNERS_DIR          = path.join(__dirname, 'resources', 'banners');
@@ -165,6 +165,15 @@ const BANNERS_MANIFEST_FILE = path.join(BANNERS_DIR, 'manifest.json');
 // getProxiedImageUrl на клиенте).
 // Цена (по ТЗ): 100 монет — простенькие гифки, 1000 — сложные/красивые.
 // Пример строки манифеста: {"id":"banner_gif_dragon","file":"dragon.gif","name":"Дракон","cost":600}
+//
+// Поддерживаемые форматы файлов: .gif / .webp — картиночная анимация
+// (рисуются клиентом как <img>, см. isVideo:false); .mp4 / .webm — видео
+// (клиент рисует <video autoplay loop muted playsinline>, см. isVideo:true
+// в profileBannerRowHTML/buildBannerPicker/renderReadOnlyBannerTab в ui.js).
+// Определяется автоматически по расширению файла — в манифесте ничего
+// дополнительно указывать не нужно.
+const BANNER_VIDEO_EXT = new Set(['.mp4', '.webm']);
+
 function loadAnimatedBanners() {
   try {
     if (!fs.existsSync(BANNERS_MANIFEST_FILE)) return [];
@@ -178,6 +187,7 @@ function loadAnimatedBanners() {
         name: e.name || e.id,
         cost: Number.isFinite(Number(e.cost)) ? Number(e.cost) : 0,
         url:  `/resources/banners/${e.file}`,
+        isVideo: BANNER_VIDEO_EXT.has(path.extname(e.file).toLowerCase()),
       }));
   } catch (e) {
     console.error('❌ loadAnimatedBanners:', e.message);
@@ -370,6 +380,21 @@ const RANK_REWARDS = {
 // клиентский файл — держим логику идентичной вручную). Награда открывается
 // не сразу по достижению звания, а на xp МЕЖДУ min этого звания и min
 // следующего: при N наградах отрезок делится на N+1 равных частей.
+// rewardKey — ДОЛЖНО совпадать 1-в-1 с rewardKey() в config.js. Id теперь
+// строится из содержимого награды (тип+значение), а не из её позиции в
+// массиве — иначе правка состава RANK_REWARDS задним числом переиспользует
+// старый claimed_ranks-id для другой награды и она показывается как уже
+// полученная, хотя игрок её не забирал (баг с "градиентный баннер сам
+// стал получен после клейма VIP").
+function rewardKey(reward) {
+  if (!reward) return 'none';
+  if (reward.type === 'coins')     return `coins_${reward.amount}`;
+  if (reward.type === 'banner')    return `banner_${reward.tier}`;
+  if (reward.type === 'shop_item') return `item_${reward.itemId}`;
+  if (reward.type === 'vip_temp')  return `vip_${reward.hours}`;
+  return `x_${JSON.stringify(reward)}`;
+}
+
 function getRankCheckpoints(rankName) {
   const rewards = RANK_REWARDS[rankName];
   if (!rewards || !rewards.length) return [];
@@ -380,7 +405,7 @@ function getRankCheckpoints(rankName) {
   const span = next ? (next.min - rank.min) : 0;
   const count = rewards.length;
   return rewards.map((reward, i) => ({
-    id: `${rankName}#${i}`,
+    id: `${rankName}#${rewardKey(reward)}`,
     reward,
     index: i,
     count,
@@ -427,7 +452,7 @@ const ACHIEVEMENTS_DEF = [
   { id:'pixels_20000',   title:'Бог Пикселей',         icon:'👑', xp:380,  check: s => s.xp >= 20000 },
   { id:'pixels_50000',   title:'Пиксельный титан',     icon:'🔥', xp:600,  check: s => s.xp >= 50000 },
   { id:'pixels_100000',  title:'Повелитель холста',    icon:'🌌', xp:1000, check: s => s.xp >= 100000 },
-  { id:'pixels_250000',  title:'Мифический творец',    icon:'🐉', xp:2000, check: s => s.xp >= 250000 },
+  { id:'pixels_250000',  title:'Чисто залутал ауры',    icon:'🐉', xp:2000, check: s => s.xp >= 250000 },
   // ── Монеты ──
   { id:'coins_100',      title:'Первая заначка',       icon:'👛', xp:15,   check: s => s.coins >= 100 },
   { id:'coins_500',      title:'Коллекционер',         icon:'🪙', xp:30,   check: s => s.coins >= 500 },
@@ -435,31 +460,31 @@ const ACHIEVEMENTS_DEF = [
   { id:'coins_2500',     title:'Инвестор',              icon:'💴', xp:90,   check: s => s.coins >= 2500 },
   { id:'coins_5000',     title:'Магнат',               icon:'💰', xp:130,  check: s => s.coins >= 5000 },
   { id:'coins_10000',    title:'Олигарх',               icon:'🏦', xp:200,  check: s => s.coins >= 10000 },
-  { id:'coins_25000',    title:'Финансовый гений',      icon:'💎', xp:350,  check: s => s.coins >= 25000 },
-  { id:'coins_50000',    title:'Хранитель сокровищ',    icon:'🏆', xp:600,  check: s => s.coins >= 50000 },
-  { id:'coins_100000',   title:'Пиксельный миллионер',  icon:'🤑', xp:1100, check: s => s.coins >= 100000 },
+  { id:'coins_25000',    title:'Хранитель семени',      icon:'💎', xp:350,  check: s => s.coins >= 25000 },
+  { id:'coins_50000',    title:'Владелец Ямианиме',     icon:'🏆', xp:600,  check: s => s.coins >= 50000 },
+  { id:'coins_100000',   title:'ЮЕЧКА ЗАМЕТЬ МЕНЯЯЯ',   icon:'🤑', xp:1100, check: s => s.coins >= 100000 },
   // ── Покупки ──
   { id:'first_purchase', title:'Первая покупка',       icon:'🛒', xp:15,   check: s => s.purchasedCount > 0 },
   { id:'purchase_5',     title:'Постоянный клиент',    icon:'🛍️', xp:25,   check: s => s.purchasedCount >= 5 },
   { id:'purchase_10',    title:'Завсегдатай магазина',  icon:'🧺', xp:45,   check: s => s.purchasedCount >= 10 },
   { id:'purchase_20',    title:'Шопоголик',            icon:'🧾', xp:75,   check: s => s.purchasedCount >= 20 },
   { id:'purchase_50',    title:'Скупщик товаров',      icon:'📦', xp:150,  check: s => s.purchasedCount >= 50 },
-  { id:'purchase_100',   title:'Владелец лавки',        icon:'🏪', xp:280,  check: s => s.purchasedCount >= 100 },
+  { id:'purchase_100',   title:'Данил Колбасенко',      icon:'🏪', xp:280,  check: s => s.purchasedCount >= 100 },
   // ── Друзья ──
-  { id:'friend_1',       title:'Первый друг',          icon:'🤝', xp:15,   check: s => s.friendsCount >= 1 },
+  { id:'friend_1',       title:'Больше не изгой :(',   icon:'🤝', xp:15,   check: s => s.friendsCount >= 1 },
   { id:'friend_5',       title:'Душа компании',        icon:'🎉', xp:35,   check: s => s.friendsCount >= 5 },
   { id:'friend_10',      title:'Душа общества',        icon:'🎊', xp:60,   check: s => s.friendsCount >= 10 },
   { id:'friend_25',      title:'Центр тусовки',         icon:'🥳', xp:120,  check: s => s.friendsCount >= 25 },
-  { id:'friend_50',      title:'Мэр сообщества',        icon:'🌐', xp:220,  check: s => s.friendsCount >= 50 },
-  { id:'friend_100',     title:'Легенда социума',       icon:'🫂', xp:400,  check: s => s.friendsCount >= 100 },
+  { id:'friend_50',      title:'Легенда социума',       icon:'🌐', xp:220,  check: s => s.friendsCount >= 50 },
+  { id:'friend_100',     title:'Гений, Кукловод, Манипулятор Аянакоджи', icon:'🫂', xp:400,  check: s => s.friendsCount >= 100 },
   // ── Баннеры ──
   { id:'banners_3',      title:'Коллекционер баннеров', icon:'🖼️', xp:40,   check: s => s.ownedBannersCount >= 3 },
   { id:'banners_6',      title:'Ценитель стиля',        icon:'🎏', xp:70,   check: s => s.ownedBannersCount >= 6 },
   { id:'banners_10',     title:'Модный игрок',          icon:'🏳️', xp:120,  check: s => s.ownedBannersCount >= 10 },
-  { id:'banners_15',     title:'Витрина достижений',    icon:'🪧', xp:200,  check: s => s.ownedBannersCount >= 15 },
-  { id:'banners_20',     title:'Галерея баннеров',      icon:'🏵️', xp:320,  check: s => s.ownedBannersCount >= 20 },
+  { id:'banners_15',     title:'Создатель стиля',       icon:'🪧', xp:200,  check: s => s.ownedBannersCount >= 15 },
+  { id:'banners_20',     title:'Нефор',                 icon:'🏵️', xp:320,  check: s => s.ownedBannersCount >= 20 },
   // ── Клан / статус ──
-  { id:'clan_member',    title:'Не один в поле',       icon:'🚩', xp:20,   check: s => !!s.clan },
+  { id:'clan_member',    title:'Возьми телефон, Детка', icon:'🚩', xp:20,   check: s => !!s.clan },
   { id:'vip',            title:'Особый статус',        icon:'✨', xp:50,   check: s => s.isVip || s.isAdmin },
   // ── Комбо-ачивки (несколько условий сразу, самые сложные — в самом конце) ──
   { id:'combo_starter',        title:'Крепкий старт',           icon:'🚀', xp:30,   check: s => s.xp >= 50 && s.coins >= 100 },
@@ -467,7 +492,7 @@ const ACHIEVEMENTS_DEF = [
   { id:'combo_shopaholic',     title:'Транжира',                icon:'💸', xp:200,  check: s => s.purchasedCount >= 20 && s.coins >= 5000 },
   { id:'combo_collector_deluxe', title:'Коллекционер де люкс',  icon:'🎭', xp:220,  check: s => s.ownedBannersCount >= 10 && s.purchasedCount >= 20 },
   { id:'combo_ultimate',       title:'Идеальный игрок',         icon:'🌠', xp:1500, check: s => s.xp >= 100000 && s.coins >= 50000 && s.friendsCount >= 25 && s.ownedBannersCount >= 15 && !!s.clan && (s.isVip || s.isAdmin) },
-  { id:'combo_grandmaster',    title:'Гроссмейстер пикселей',   icon:'🏅', xp:2500, check: s => s.xp >= 250000 && s.coins >= 100000 && s.purchasedCount >= 100 },
+  { id:'combo_grandmaster',    title:'Ты на улицу выходишь вообще?', icon:'🏅', xp:2500, check: s => s.xp >= 250000 && s.coins >= 100000 && s.purchasedCount >= 100 },
 ];
 // 'session_100' ("поставь 100 пикселей за сессию") намеренно НЕ включён
 // сюда — счётчик сессии живёт только в клиентском state.js и не
