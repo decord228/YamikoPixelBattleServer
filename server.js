@@ -3605,6 +3605,95 @@ initDatabases().then(async () => {
             ws.send(JSON.stringify({ action:'toast', message:'Холст очищен!' }));
           }
 
+          // ── ПОЛНЫЙ СБРОС ПИКСЕЛЬ БАТЛА ──
+          // Готовит проект "с нуля" к новому мероприятию: холст, все статистики
+          // (пиксели/xp/звания/монеты/ачивки/инвентарь/трафареты/баннеры/друзья),
+          // кланы, новости и чат — очищаются полностью. Обычные аккаунты (role
+          // !== 'admin') удаляются целиком, админские остаются, но их игровые
+          // данные тоже обнуляются (логин/пароль/роль не трогаем).
+          // Требует точное текстовое подтверждение (data.params), чтобы случайный
+          // клик не мог снести данные — фраза сверяется и на клиенте, и здесь.
+          else if (cmd === 'full_reset') {
+            const CONFIRM_PHRASE = 'ОЧИСТИТЬ ВСЁ';
+            if ((data.params || '').trim().toUpperCase() !== CONFIRM_PHRASE) {
+              ws.send(JSON.stringify({ action:'toast', message:'Неверная фраза подтверждения. Сброс отменён.' }));
+              return;
+            }
+
+            try {
+              // 1. Холст и таблица владельцев пикселей
+              if (tl && tl.isRecording()) { try { await tl.stop?.(); } catch(_) {} }
+              canvasData.fill(0);
+              if (pixelOwners) pixelOwners.fill(0);
+              ownerIdMap.clear();
+              ownerDataMap.clear();
+              isDirty = true; ownersDirty = true;
+              await persistCanvas();
+
+              // 2. Аккаунты: удаляем всех не-админов, обнуляем статистику админам
+              const allAccs = await dbGetAllAccounts();
+              const RESET_FIELDS = {
+                pixels: 0, xp: 0, rank: 'Новичок', coins: 0,
+                clan: '', inventory: {}, upgrades: [],
+                active_stencil: null, saved_stencils: [],
+                friends: [], friend_requests_in: [], friend_requests_out: [], dm_reads: {},
+                banner_id: null, owned_banners: [],
+                unlocked_achievements: [], claimed_ranks: [], claimed_achievements: [],
+                vip_temp_until: 0, vip_temp_prev_role: '',
+                banned: false, timeout_until: 0,
+              };
+              for (const acc of allAccs) {
+                const username = acc.username;
+                if (acc.role === 'admin') {
+                  await dbSaveAccount(username, RESET_FIELDS);
+                } else {
+                  if (AccountModel) {
+                    try { await AccountModel.deleteOne({ username }).exec(); } catch(e) {}
+                  }
+                  delete accounts[username];
+                }
+              }
+              dirtyAccounts.clear();
+
+              // 3. Кланы
+              const allClans = await dbGetAllClans();
+              if (ClanModel) { try { await ClanModel.deleteMany({}).exec(); } catch(e) {} }
+              for (const c of allClans) delete clans[c.name];
+              clans = {};
+              dirtyClans.clear();
+
+              // 4. Новости
+              if (NewsModel) { try { await NewsModel.deleteMany({}).exec(); } catch(e) {} }
+              newsItems.length = 0;
+              saveLocalNews();
+
+              // 5. Личные сообщения
+              if (DMModel) { try { await DMModel.deleteMany({}).exec(); } catch(e) {} }
+
+              // 6. Глобальный чат
+              globalChatHistory.length = 0;
+
+              // 7. Отключаем всех, кроме текущего админа — их аккаунтов больше нет,
+              // либо их данные полностью сброшены, безопаснее переподключить заново.
+              wss.clients.forEach(c => {
+                if (c === ws) return;
+                if (c.readyState === 1) {
+                  try { c.send(JSON.stringify({ action:'toast', message:'Пиксель Батл был полностью очищен администратором. Обновите страницу.' })); } catch(_) {}
+                  try { c.close(); } catch(_) {}
+                }
+              });
+
+              // 8. Рассылаем всем (включая незалогиненных зрителей) чистый холст
+              wss.clients.forEach(c => { if (c.readyState===1) c.send(canvasData); });
+
+              ws.send(JSON.stringify({ action:'toast', message:'✅ Пиксель Батл полностью очищен и готов к новому мероприятию!' }));
+              console.log(`⚠️  ПОЛНЫЙ СБРОС выполнен администратором ${ws.userData?.username}`);
+            } catch (e) {
+              console.error('❌ full_reset:', e.message);
+              ws.send(JSON.stringify({ action:'toast', message:'Ошибка при полном сбросе: ' + e.message }));
+            }
+          }
+
           else if (cmd === 'draw_shape') {
             const { type, params } = data;
             const cidx = data.colorIdx || 0;
