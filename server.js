@@ -572,14 +572,14 @@ const SHOP_ITEMS = [
   { id: 'stencil_auto_2', title:'Авто-подбор цветов Ур.2', cost:150, role:'user', type:'upgrade' },
   // Общие расходники (доступны всем, не требуют VIP)
   { id: 'bomb_3x3',       title:'Цветная бомбочка 3×3',    cost:5,   role:'user', type:'consumable' },
-  { id: 'cooldown_boost_25', title:'Ускоритель −25%',    cost:10,  role:'user', type:'consumable', pct:25, durationMin:15 },
-  { id: 'cooldown_boost_50', title:'Ускоритель −50%',    cost:25,  role:'user', type:'consumable', pct:50, durationMin:15 },
+  { id: 'cooldown_boost_25', title:'Ускоритель −25%',    cost:10,  role:'user', type:'cooldown_boost', pct:25, durationMin:15 },
+  { id: 'cooldown_boost_50', title:'Ускоритель −50%',    cost:25,  role:'user', type:'cooldown_boost', pct:50, durationMin:15 },
   // VIP
   { id: 'rainbow_5x5',    title:'Радужный взрыв 5×5',      cost:12,  role:'vip',  type:'consumable' },
   { id: 'eraser_10x10',   title:'Большой Ластик 10×10',    cost:20,  role:'vip',  type:'consumable' },
   { id: 'mirror_stamp',   title:'Зеркальный штамп',        cost:35,  role:'vip',  type:'consumable' },
   // Кулдаун-ускоритель турбо остаётся VIP-эксклюзивом
-  { id: 'cooldown_boost_90', title:'Турбо-режим −90%',   cost:55,  role:'vip', type:'consumable', pct:90, durationMin:5  },
+  { id: 'cooldown_boost_90', title:'Турбо-режим −90%',   cost:55,  role:'vip', type:'cooldown_boost', pct:90, durationMin:5  },
 ];
 
 const COOLDOWN_BOOST_IDS = { cooldown_boost_25:{pct:25,durationMin:15}, cooldown_boost_50:{pct:50,durationMin:15}, cooldown_boost_90:{pct:90,durationMin:5} };
@@ -615,6 +615,10 @@ if (mongoose) {
     clan:              { type: String, default: '' },
     inventory:         { type: Object, default: {} },
     upgrades:          { type: [String], default: [] },
+    // Активный ускоритель кулдауна. Храним отдельно от инвентаря, чтобы
+    // эффект не пропадал при переподключении или перезапуске сервера.
+    cooldownBoostPct:   { type: Number, default: 0 },
+    cooldownBoostUntil: { type: Number, default: 0 },
     active_stencil:    { type: Object, default: null }, // Текущий трафарет
     saved_stencils:    { type: Array, default: [] },    // Сохраненные пресеты трафаретов
 
@@ -1451,6 +1455,37 @@ initDatabases().then(async () => {
     }
   }
 
+  // Вход с обычного сайта. Redirect URI фиксирован на сервере, чтобы
+  // клиент не мог подменить адрес, на который выдаётся OAuth-токен.
+  app.post('/api/discord-web-token', async (req, res) => {
+    try {
+      const { code, redirect_uri } = req.body;
+      const redirectUri = process.env.DISCORD_WEB_REDIRECT_URI || 'https://decord228.github.io/YamikoPixelBattle/';
+      if (!code || redirect_uri !== redirectUri) return res.status(400).json({ error: 'Invalid OAuth callback' });
+
+      const response = await fetch('https://discord.com/api/oauth2/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: process.env.DISCORD_CLIENT_ID,
+          client_secret: process.env.DISCORD_CLIENT_SECRET,
+          grant_type: 'authorization_code',
+          redirect_uri: redirectUri,
+          code,
+        }),
+      });
+      const data = await response.json();
+      if (!data.access_token) {
+        console.error('Discord website token error:', data);
+        return res.status(400).json({ error: 'Failed to get token' });
+      }
+      res.json({ access_token: data.access_token });
+    } catch (e) {
+      console.error('/api/discord-web-token error:', e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // ── TIMELAPSE ENDPOINTS ─────────────────────────────────
   app.get('/api/timelapse/sessions', async (req, res) => {
     try {
@@ -1847,6 +1882,17 @@ initDatabases().then(async () => {
           ws.send(JSON.stringify({ action:'toast', message:'🔒 Пиксель Батл временно закрыт' })); return;
         }
 
+        // Кулдаун проверяется и на сервере. Раньше ускоритель менял лишь
+        // таймер в браузере: после переподключения эффект исчезал, а клиент
+        // мог вообще обойти ограничение. Для всех ролей используется базовый
+        // кулдаун, уменьшенный активным личным ускорителем.
+        const now = Date.now();
+        const boostIsActive = (acc.cooldownBoostUntil || 0) > now && (acc.cooldownBoostPct || 0) > 0;
+        const effectiveCooldownMs = boostIsActive
+          ? Math.max(0, Math.round(serverSettings.cooldownMs * (1 - Math.min(100, acc.cooldownBoostPct) / 100)))
+          : serverSettings.cooldownMs;
+        if (acc._lastPixelAt && now - acc._lastPixelAt < effectiveCooldownMs) return;
+
         const x       = (message[0] << 8) | message[1];
         const y       = (message[2] << 8) | message[3];
         const colorIdx = message[4];
@@ -1860,6 +1906,7 @@ initDatabases().then(async () => {
 
           acc._lastPixel = { x, y };
           acc._lastColor = colorIdx;
+          acc._lastPixelAt = now;
 
           const prevCoins = acc.coins || 0;
           const prevRank  = acc.rank;
@@ -1943,6 +1990,8 @@ initDatabases().then(async () => {
                   clan:           '',
                   inventory:      {},
                   upgrades:       [],
+                  cooldownBoostPct: 0,
+                  cooldownBoostUntil: 0,
                   active_stencil: null,
                   saved_stencils: [],
                   friends:             [],
@@ -2045,6 +2094,9 @@ initDatabases().then(async () => {
             }
           }
           // ── Обычная авторизация username+password ─────────
+          ws.send(JSON.stringify({ action: 'toast', message: 'Вход возможен только через Discord' }));
+          return;
+
           const username    = (data.username || '').trim();
           const password    = (data.password || '').trim();
           const email       = (data.email    || '').trim();
@@ -2059,7 +2111,7 @@ initDatabases().then(async () => {
             if (existing) { ws.send(JSON.stringify({ action:'toast', message:'Ник уже занят!' })); return; }
             let role = 'user';
             if ((username === 'd3cord' && email === 'otarasik10@gmail.com') || username === ADMIN_USERNAME) role = 'admin';
-            const newUser = { username, password, email, role, pixels: 0, rank: 'Новичок', emoji: '👾', banned: false, timeout_until: 0, coins: 0, clan: '', inventory: {}, upgrades: [], active_stencil: null, saved_stencils: [], friends: [], friend_requests_in: [], friend_requests_out: [], dm_reads: {}, banner_id: null, owned_banners: [], xp: 0, unlocked_achievements: [], claimed_ranks: [], claimed_achievements: [] };
+            const newUser = { username, password, email, role, pixels: 0, rank: 'Новичок', emoji: '👾', banned: false, timeout_until: 0, coins: 0, clan: '', inventory: {}, upgrades: [], cooldownBoostPct: 0, cooldownBoostUntil: 0, active_stencil: null, saved_stencils: [], friends: [], friend_requests_in: [], friend_requests_out: [], dm_reads: {}, banner_id: null, owned_banners: [], xp: 0, unlocked_achievements: [], claimed_ranks: [], claimed_achievements: [] };
             await dbSaveAccount(username, newUser);
             ws.userData = { ...newUser };
           } else {
