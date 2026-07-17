@@ -239,6 +239,14 @@ function setPixelOwner(x, y, username, emoji, avatar) {
   ownersDirty = true;
 }
 
+// Расходники меняют холст, но не являются личной установкой пикселя.
+// Сбрасываем автора, чтобы такие клетки не попадали в статистику владения.
+function clearPixelOwner(x, y) {
+  if (!pixelOwners || x < 0 || x >= CANVAS_WIDTH || y < 0 || y >= CANVAS_HEIGHT) return;
+  pixelOwners[y * CANVAS_WIDTH + x] = 0;
+  ownersDirty = true;
+}
+
 function getPixelOwner(x, y) {
   if (!pixelOwners || x < 0 || x >= CANVAS_WIDTH || y < 0 || y >= CANVAS_HEIGHT) return null;
   const id = pixelOwners[y * CANVAS_WIDTH + x];
@@ -579,10 +587,10 @@ const SHOP_ITEMS = [
   { id: 'eraser_10x10',   title:'Большой Ластик 10×10',    cost:20,  role:'vip',  type:'consumable' },
   { id: 'mirror_stamp',   title:'Зеркальный штамп',        cost:35,  role:'vip',  type:'consumable' },
   // Кулдаун-ускоритель турбо остаётся VIP-эксклюзивом
-  { id: 'cooldown_boost_90', title:'Турбо-режим −90%',   cost:55,  role:'vip', type:'cooldown_boost', pct:90, durationMin:5  },
+  { id: 'cooldown_boost_90', title:'Турбо-режим −90%',   cost:300, role:'vip', type:'cooldown_boost', pct:90, durationMin:30 },
 ];
 
-const COOLDOWN_BOOST_IDS = { cooldown_boost_25:{pct:25,durationMin:15}, cooldown_boost_50:{pct:50,durationMin:15}, cooldown_boost_90:{pct:90,durationMin:5} };
+const COOLDOWN_BOOST_IDS = { cooldown_boost_25:{pct:25,durationMin:15}, cooldown_boost_50:{pct:50,durationMin:15}, cooldown_boost_90:{pct:90,durationMin:30} };
 
 // ── DB TIMEOUT HELPER ──────────────────────────────────────
 const dbTimeout = (promise, ms = 4000) => Promise.race([
@@ -1843,6 +1851,9 @@ initDatabases().then(async () => {
     await dbSaveAccount(acc.username, { inventory: inv });
 
     if (pixels.length > 0) {
+      // Клетки от бомбочек и других расходников не принадлежат игроку
+      // и не должны учитываться в его статистике пикселей.
+      pixels.forEach(p => clearPixelOwner(p.x, p.y));
       isDirty = true;
       sendPixelBulk(pixels);
       recordPixelsForTimelapse(pixels);
@@ -3729,13 +3740,14 @@ initDatabases().then(async () => {
               // 6. Глобальный чат
               globalChatHistory.length = 0;
 
-              // 7. Отключаем всех, кроме текущего админа — их аккаунтов больше нет,
-              // либо их данные полностью сброшены, безопаснее переподключить заново.
+              // 7. Не отключаем пользователей после полного сброса.
+              // Раньше здесь был автокик всех, кроме текущего администратора:
+              // из-за него игроки без роли теряли сессию сразу после сброса.
+              // Теперь соединения сохраняются для всех ролей.
               wss.clients.forEach(c => {
                 if (c === ws) return;
                 if (c.readyState === 1) {
-                  try { c.send(JSON.stringify({ action:'toast', message:'Пиксель Батл был полностью очищен администратором. Обновите страницу.' })); } catch(_) {}
-                  try { c.close(); } catch(_) {}
+                  try { c.send(JSON.stringify({ action:'toast', message:'Пиксель Батл был полностью очищен администратором.' })); } catch(_) {}
                 }
               });
 
