@@ -1460,7 +1460,9 @@ initDatabases().then(async () => {
   app.post('/api/discord-web-token', async (req, res) => {
     try {
       const { code, redirect_uri } = req.body;
-      const redirectUri = process.env.DISCORD_WEB_REDIRECT_URI || 'https://decord228.github.io/YamikoPixelBattle/';
+      // Должен посимвольно совпадать с URI из клиента и Discord Developer Portal.
+      // GitHub Pages сам переадресует на URL со слешем, но для OAuth он не нужен.
+      const redirectUri = process.env.DISCORD_WEB_REDIRECT_URI || 'https://decord228.github.io/YamikoPixelBattle';
       if (!code || redirect_uri !== redirectUri) return res.status(400).json({ error: 'Invalid OAuth callback' });
 
       const response = await fetch('https://discord.com/api/oauth2/token', {
@@ -1780,7 +1782,7 @@ initDatabases().then(async () => {
       for (let k in inv) { for (let i = 0; i < inv[k]; i++) clientItems.push(k); }
       ws.send(JSON.stringify({ action:'toast', message:`⚡ Ускоритель активирован: −${boost.pct}% на ${boost.durationMin} мин.`, type:'success' }));
       ws.send(JSON.stringify({ action:'purchase_update', purchased_items: clientItems }));
-      ws.send(JSON.stringify({ action:'cooldown_boost_update', pct: boost.pct, until }));
+      ws.send(JSON.stringify({ action:'cooldown_boost_update', pct: boost.pct, until, server_now: Date.now() }));
       return;
     }
 
@@ -2081,6 +2083,7 @@ initDatabases().then(async () => {
                 friend_requests_in:   ws.userData.friend_requests_in   || [],
                 friend_requests_out:  ws.userData.friend_requests_out  || [],
                 cooldown_boost:  (ws.userData.cooldownBoostUntil > Date.now()) ? { pct: ws.userData.cooldownBoostPct, until: ws.userData.cooldownBoostUntil } : null,
+                server_now: Date.now(),
               }));
               broadcastOnlineCount();
               notifyFriendsPresence(ws.userData.username, true);
@@ -2175,6 +2178,7 @@ initDatabases().then(async () => {
             stencil:   ws.userData.active_stencil,
             saved_stencils: ws.userData.saved_stencils,
             cooldown_boost: (ws.userData.cooldownBoostUntil > Date.now()) ? { pct: ws.userData.cooldownBoostPct, until: ws.userData.cooldownBoostUntil } : null,
+            server_now: Date.now(),
             friends:              ws.userData.friends              || [],
             friend_requests_in:   ws.userData.friend_requests_in   || [],
             friend_requests_out:  ws.userData.friend_requests_out  || [],
