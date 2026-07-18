@@ -1091,12 +1091,68 @@ function dmPairKey(a, b) {
   return [a, b].sort((x, y) => x.localeCompare(y)).join('__');
 }
 
+// Redis хранит актуальную копию ЛС независимо от MongoDB. Это важно для
+// рестартов на Render: локальный dm.json там является только временным кэшем.
+const dmRedisKey = key => `dm_thread:${key}`;
+const dmPartnersRedisKey = username => `dm_partners:${username}`;
+
+function parseDMRedisValue(value, fallback) {
+  if (!value) return fallback;
+  try { return typeof value === 'string' ? JSON.parse(value) : value; } catch (_) { return fallback; }
+}
+
+async function redisGetDMThread(key) {
+  if (!redis) return null;
+  try {
+    const stored = parseDMRedisValue(await redis.get(dmRedisKey(key)), null);
+    return Array.isArray(stored?.messages) ? { messages: stored.messages } : null;
+  } catch (e) {
+    console.error(`❌ Redis ЛС (${key}):`, e.message);
+    return null;
+  }
+}
+
+async function redisSaveDMThread(key, thread) {
+  if (!redis) return;
+  try { await redis.set(dmRedisKey(key), JSON.stringify({ messages: thread.messages })); }
+  catch (e) { console.error(`❌ Redis сохранение ЛС (${key}):`, e.message); }
+}
+
+async function redisRememberDMPartners(a, b) {
+  if (!redis) return;
+  try {
+    for (const [user, peer] of [[a, b], [b, a]]) {
+      const stored = parseDMRedisValue(await redis.get(dmPartnersRedisKey(user)), []);
+      const partners = Array.isArray(stored) ? stored : [];
+      if (!partners.includes(peer)) partners.push(peer);
+      await redis.set(dmPartnersRedisKey(user), JSON.stringify(partners));
+    }
+  } catch (e) { console.error('❌ Redis список ЛС:', e.message); }
+}
+
 async function dbGetDMThread(a, b) {
   const key = dmPairKey(a, b);
+
+  // Сначала берём постоянно сохранённую Redis-копию: она записывается при
+  // каждом сообщении и не зависит от состояния/доступности MongoDB.
+  const redisThread = await redisGetDMThread(key);
+  if (redisThread) {
+    dmThreads[key] = redisThread;
+    return redisThread;
+  }
+
+  // Если Redis временно недоступен, используем загруженный локальный кэш.
+  if (dmThreads[key]) return dmThreads[key];
+
   if (DMModel) {
     try {
       const doc = await dbTimeout(DMModel.findOne({ pairKey: key }).lean().exec());
-      if (doc) dmThreads[key] = { messages: doc.messages || [] };
+      if (doc) {
+        dmThreads[key] = { messages: Array.isArray(doc.messages) ? doc.messages : [] };
+        // Переносим ранее сохранённые Mongo-диалоги в надёжную Redis-копию.
+        await redisSaveDMThread(key, dmThreads[key]);
+        await redisRememberDMPartners(a, b);
+      }
     } catch(e) { console.error(`❌ dbGetDMThread(${key}):`, e.message); }
   }
   return dmThreads[key] || { messages: [] };
@@ -1108,6 +1164,14 @@ async function dbAppendDMMessage(a, b, msg) {
   thread.messages.push(msg);
   if (thread.messages.length > DM_HISTORY_LIMIT) thread.messages.shift();
   dmThreads[key] = thread;
+
+  // Сохраняем до рассылки сообщения. Даже если MongoDB временно недоступна,
+  // история останется после перезапуска и будет восстановлена из Redis.
+  await Promise.all([
+    redisSaveDMThread(key, thread),
+    redisRememberDMPartners(a, b),
+  ]);
+
   if (DMModel) {
     try {
       await dbTimeout(DMModel.findOneAndUpdate({ pairKey: key }, { pairKey: key, messages: thread.messages }, { upsert: true }).exec());
@@ -1121,16 +1185,27 @@ async function dbAppendDMMessage(a, b, msg) {
 // Список username-ов, с которыми у пользователя есть история переписки (для ЛС-списка бесед),
 // даже если это не друзья — переписка сохраняется независимо от списка друзей.
 async function dbGetDMPartners(username) {
+  const partners = new Set(
+    Object.keys(dmThreads)
+      .filter(key => key.split('__').includes(username))
+      .map(key => key.split('__').find(u => u !== username))
+      .filter(Boolean)
+  );
+
+  if (redis) {
+    try {
+      const stored = parseDMRedisValue(await redis.get(dmPartnersRedisKey(username)), []);
+      if (Array.isArray(stored)) stored.forEach(peer => { if (typeof peer === 'string' && peer !== username) partners.add(peer); });
+    } catch(e) { console.error('❌ Redis список ЛС:', e.message); }
+  }
+
   if (DMModel) {
     try {
       const docs = await dbTimeout(DMModel.find({ pairKey: new RegExp(`(^|__)${username.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}(__|$)`) }).lean().exec());
-      return docs.map(d => d.pairKey.split('__').find(u => u !== username)).filter(Boolean);
-    } catch(e) { console.error('❌ dbGetDMPartners:', e.message); return []; }
+      docs.map(d => d.pairKey.split('__').find(u => u !== username)).filter(Boolean).forEach(peer => partners.add(peer));
+    } catch(e) { console.error('❌ dbGetDMPartners:', e.message); }
   }
-  return Object.keys(dmThreads)
-    .filter(key => key.split('__').includes(username))
-    .map(key => key.split('__').find(u => u !== username))
-    .filter(Boolean);
+  return [...partners];
 }
 
 async function dbGetSettings() {
@@ -1195,11 +1270,11 @@ async function initDatabases() {
     }
   }
 
-  // Личные сообщения из файла (если нет MongoDB)
-  if (!DMModel) {
-    if (fs.existsSync(DM_FILE)) {
-      try { dmThreads = JSON.parse(fs.readFileSync(DM_FILE, 'utf8')); } catch(e) {}
-    }
+  // Локальный файл — резервный кэш ЛС. Загружаем его и при активной MongoDB:
+  // это позволяет не терять переписку, если база была недоступна в момент
+  // сохранения предыдущего сообщения.
+  if (fs.existsSync(DM_FILE)) {
+    try { dmThreads = JSON.parse(fs.readFileSync(DM_FILE, 'utf8')); } catch(e) {}
   }
 
   // Метаданные холста
@@ -1745,6 +1820,17 @@ initDatabases().then(async () => {
     broadcastToClan(clanName, JSON.stringify({ action:'clan_stencil_update', stencils: remaining, from: username, removed: true }), null);
   }
 
+  // Полный снимок холста и пакет точечных обновлений раньше оба были просто
+  // Uint8Array. Если размер снимка оказывался кратен 5, старый клиент мог
+  // принять его за список пикселей и нарисовать случайные точки. Перед каждым
+  // снимком отправляем явный маркер с размерами; WebSocket сохраняет порядок
+  // сообщений, поэтому следующий binary-пакет однозначно является снимком.
+  function sendCanvasSnapshot(client) {
+    if (!client || client.readyState !== 1) return;
+    client.send(JSON.stringify({ action: 'canvas_snapshot', w: CANVAS_WIDTH, h: CANVAS_HEIGHT }));
+    client.send(canvasData);
+  }
+
   setInterval(() => {
     if (!pixelBatchBuffer.length) return;
     const batch  = pixelBatchBuffer.splice(0);
@@ -1942,7 +2028,7 @@ initDatabases().then(async () => {
     ws.isAuthorized = false;
     ws.userData     = null;
 
-    ws.send(canvasData);
+    sendCanvasSnapshot(ws);
     ws.send(JSON.stringify({ action: 'server_settings', settings: serverSettings }));
     dbGetNews().then(items => ws.send(JSON.stringify({ action: 'news_data', items }))).catch(()=>{});
     if (globalChatHistory.length > 0) {
@@ -2169,7 +2255,7 @@ initDatabases().then(async () => {
               }));
               broadcastOnlineCount();
               notifyFriendsPresence(ws.userData.username, true);
-              ws.send(canvasData);
+              sendCanvasSnapshot(ws);
               return;
 
             } catch(e) {
@@ -2268,7 +2354,7 @@ initDatabases().then(async () => {
           }));
           broadcastOnlineCount();
           notifyFriendsPresence(ws.userData.username, true);
-          ws.send(canvasData);
+          sendCanvasSnapshot(ws);
         }
 
         else if (action === 'save_personal_stencil') {
@@ -3570,7 +3656,7 @@ initDatabases().then(async () => {
               }
 
               const msg = JSON.stringify({ action:'resize', w:newW, h:newH });
-              wss.clients.forEach(c => { if (c.readyState===1&&c.isAuthorized) { c.send(msg); c.send(canvasData); } });
+              wss.clients.forEach(c => { if (c.readyState===1&&c.isAuthorized) { c.send(msg); sendCanvasSnapshot(c); } });
               ws.send(JSON.stringify({ action:'toast', message:`Холст изменён до ${newW}×${newH}` }));
             }
           }
@@ -3757,7 +3843,7 @@ initDatabases().then(async () => {
             canvasData.fill(0);
             if (pixelOwners) pixelOwners.fill(0);
             isDirty = true; ownersDirty = true;
-            wss.clients.forEach(c => { if (c.readyState===1&&c.isAuthorized) c.send(canvasData); });
+            wss.clients.forEach(c => { if (c.readyState===1&&c.isAuthorized) sendCanvasSnapshot(c); });
             ws.send(JSON.stringify({ action:'toast', message:'Холст очищен!' }));
           }
 
@@ -3841,7 +3927,7 @@ initDatabases().then(async () => {
               });
 
               // 8. Рассылаем всем (включая незалогиненных зрителей) чистый холст
-              wss.clients.forEach(c => { if (c.readyState===1) c.send(canvasData); });
+              wss.clients.forEach(c => { if (c.readyState===1) sendCanvasSnapshot(c); });
 
               ws.send(JSON.stringify({ action:'toast', message:'✅ Пиксель Батл полностью очищен и готов к новому мероприятию!' }));
               console.log(`⚠️  ПОЛНЫЙ СБРОС выполнен администратором ${ws.userData?.username}`);
