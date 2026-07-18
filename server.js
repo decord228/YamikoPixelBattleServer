@@ -2103,7 +2103,7 @@ initDatabases().then(async () => {
           }
 
           if (Math.floor(acc.coins) > Math.floor(prevCoins)) {
-            ws.send(JSON.stringify({ action: 'coins_update', coins: acc.coins, pixels: acc.pixels }));
+            ws.send(JSON.stringify({ action: 'coins_update', coins: acc.coins, pixels: acc.pixels, xp: acc.xp }));
           }
 
           // Ачивки проверяем на каждый пиксель, но это дёшево (просто сравнения
@@ -2391,16 +2391,21 @@ initDatabases().then(async () => {
           const byUsername = new Map(persisted.map(a => [a.username, a]));
           Object.values(accounts).forEach(a => byUsername.set(a.username, { ...(byUsername.get(a.username) || {}), ...a }));
           const allAccs = Array.from(byUsername.values());
-          const players  = allAccs
-            .map(a => ({ username: a.username, pixels: a.pixels||0, emoji: a.emoji||'👾', avatar: getAvatarUrl(a), banner: a.banner_id||null, rank: a.rank||'Новичок' }))
-            .sort((a, b) => b.pixels - a.pixels).slice(0, 30);
+          // Лидерборд строится по опыту. При равном XP выше тот, кто поставил
+          // больше пикселей; это делает порядок стабильным между обновлениями.
+          const rankedPlayers = allAccs
+            .map(a => ({ username: a.username, pixels: a.pixels||0, xp: a.xp||0, emoji: a.emoji||'👾', avatar: getAvatarUrl(a), banner: a.banner_id||null, rank: a.rank||'Новичок' }))
+            .sort((a, b) => (b.xp - a.xp) || (b.pixels - a.pixels) || a.username.localeCompare(b.username));
+          const meIndex = rankedPlayers.findIndex(player => player.username === ws.userData.username);
+          const players = rankedPlayers.slice(0, 50).map((player, index) => ({ ...player, place: index + 1 }));
+          const you = meIndex >= 0 ? { ...rankedPlayers[meIndex], place: meIndex + 1 } : null;
           const allClans = await dbGetAllClans();
           const clanTop  = allClans
             .filter(c => c.is_public !== false)
             .map(c => ({ name: c.name, tag: c.tag||'', icon: c.icon||'', tag_color: c.tag_color||'#818cf8', pixels: c.pixels||0, members: (c.members||[]).length,
                          banner_url: c.banner_url||null, banner_crop_x: c.banner_crop_x??0, banner_crop_y: c.banner_crop_y??0, banner_crop_w: c.banner_crop_w??1, banner_crop_h: c.banner_crop_h??1 }))
             .sort((a, b) => b.pixels - a.pixels).slice(0, 20);
-          ws.send(JSON.stringify({ action: 'leaderboard_data', players, clans: clanTop }));
+          ws.send(JSON.stringify({ action: 'leaderboard_data', players, clans: clanTop, you }));
         }
 
         else if (action === 'cursor') {
@@ -3335,7 +3340,9 @@ initDatabases().then(async () => {
           const maxCycle = Math.floor(((acc.xp || 0) - REPEAT_XP_REWARD.startXp) / REPEAT_XP_REWARD.stepXp);
           const requested = Math.floor(Number(data.cycle));
           if (!Number.isInteger(requested) || requested < 1 || requested > maxCycle) { ws.send(JSON.stringify({ action:'toast', message:'Награда ещё не открыта' })); return; }
-          const claimed = acc.claimed_xp_cycles || [];
+          // Старые аккаунты могли сохранить номера циклов строками. Сравниваем
+          // как числа, чтобы такая запись не ломала выдачу следующей награды.
+          const claimed = [...new Set((acc.claimed_xp_cycles || []).map(Number).filter(Number.isInteger))];
           if (claimed.includes(requested)) { ws.send(JSON.stringify({ action:'toast', message:'Награда уже получена' })); return; }
           const newCoins = (acc.coins || 0) + REPEAT_XP_REWARD.coins;
           const newClaimed = [...claimed, requested];
