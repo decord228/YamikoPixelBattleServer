@@ -1493,8 +1493,13 @@ initDatabases().then(async () => {
       const { code, redirect_uri } = req.body;
       // Должен посимвольно совпадать с URI из клиента и Discord Developer Portal.
       // GitHub Pages сам переадресует на URL со слешем, но для OAuth он не нужен.
-      const redirectUri = process.env.DISCORD_WEB_REDIRECT_URI || 'https://decord228.github.io/YamikoPixelBattle';
-      if (!code || redirect_uri !== redirectUri) return res.status(400).json({ error: 'Invalid OAuth callback' });
+        const productionRedirectUri = process.env.DISCORD_WEB_REDIRECT_URI || 'https://decord228.github.io/YamikoPixelBattle';
+        // Локальный URI нужен только для разработки. Разрешаем ровно заданный
+        // localhost-адрес, а не произвольный redirect из запроса.
+        const localRedirectUri = process.env.DISCORD_LOCAL_REDIRECT_URI || 'http://localhost:5500';
+        const allowedRedirectUris = new Set([productionRedirectUri, localRedirectUri]);
+        if (!code || !allowedRedirectUris.has(redirect_uri)) return res.status(400).json({ error: 'Invalid OAuth callback' });
+        const redirectUri = redirect_uri;
 
       const response = await fetch('https://discord.com/api/oauth2/token', {
         method: 'POST',
