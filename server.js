@@ -239,14 +239,6 @@ function setPixelOwner(x, y, username, emoji, avatar) {
   ownersDirty = true;
 }
 
-// Расходники меняют холст, но не являются личной установкой пикселя.
-// Сбрасываем автора, чтобы такие клетки не попадали в статистику владения.
-function clearPixelOwner(x, y) {
-  if (!pixelOwners || x < 0 || x >= CANVAS_WIDTH || y < 0 || y >= CANVAS_HEIGHT) return;
-  pixelOwners[y * CANVAS_WIDTH + x] = 0;
-  ownersDirty = true;
-}
-
 function getPixelOwner(x, y) {
   if (!pixelOwners || x < 0 || x >= CANVAS_WIDTH || y < 0 || y >= CANVAS_HEIGHT) return null;
   const id = pixelOwners[y * CANVAS_WIDTH + x];
@@ -491,6 +483,9 @@ const ACHIEVEMENTS_DEF = [
   { id:'banners_10',     title:'Модный игрок',          icon:'🏳️', xp:120,  check: s => s.ownedBannersCount >= 10 },
   { id:'banners_15',     title:'Создатель стиля',       icon:'🪧', xp:200,  check: s => s.ownedBannersCount >= 15 },
   { id:'banners_20',     title:'Нефор',                 icon:'🏵️', xp:320,  check: s => s.ownedBannersCount >= 20 },
+  // Счётчик хранится на соединении, чтобы достижение нельзя было получить
+  // простой подменой клиентского значения sessionPixels.
+  { id:'session_100',    title:'Дикий огурец',           icon:'🕐', xp:25,   check: s => s.sessionPixels >= 100 },
   // ── Клан / статус ──
   { id:'clan_member',    title:'Возьми телефон, Детка', icon:'🚩', xp:20,   check: s => !!s.clan },
   { id:'vip',            title:'Особый статус',        icon:'✨', xp:50,   check: s => s.isVip || s.isAdmin },
@@ -502,12 +497,7 @@ const ACHIEVEMENTS_DEF = [
   { id:'combo_ultimate',       title:'Идеальный игрок',         icon:'🌠', xp:1500, check: s => s.xp >= 100000 && s.coins >= 50000 && s.friendsCount >= 25 && s.ownedBannersCount >= 15 && !!s.clan && (s.isVip || s.isAdmin) },
   { id:'combo_grandmaster',    title:'Ты на улицу выходишь вообще?', icon:'🏅', xp:2500, check: s => s.xp >= 250000 && s.coins >= 100000 && s.purchasedCount >= 100 },
 ];
-// 'session_100' ("поставь 100 пикселей за сессию") намеренно НЕ включён
-// сюда — счётчик сессии живёт только в клиентском state.js и не
-// персистится на сервере, поэтому её отслеживает и подсвечивает сам
-// клиент (см. buildAchievementStats/renderProfileAchievementsTab в ui.js).
-
-function buildAchievementStats(acc) {
+function buildAchievementStats(acc, { sessionPixels = 0 } = {}) {
   const purchasedCount = (acc.upgrades || []).length +
     Object.values(acc.inventory || {}).reduce((a, b) => a + b, 0);
   return {
@@ -518,6 +508,7 @@ function buildAchievementStats(acc) {
     purchasedCount,
     friendsCount: (acc.friends || []).length,
     ownedBannersCount: (acc.owned_banners || []).length,
+    sessionPixels,
     isVip: acc.role === 'vip' || hasActiveTempVip(acc),
     isAdmin: acc.role === 'admin',
   };
@@ -579,7 +570,7 @@ const SHOP_ITEMS = [
   { id: 'stencil_auto_1', title:'Авто-подбор цветов Ур.1', cost:70,  role:'user', type:'upgrade' },
   { id: 'stencil_auto_2', title:'Авто-подбор цветов Ур.2', cost:150, role:'user', type:'upgrade' },
   // Общие расходники (доступны всем, не требуют VIP)
-  { id: 'bomb_3x3',       title:'Цветная бомбочка 3×3',    cost:5,   role:'user', type:'consumable' },
+  { id: 'bomb_3x3',       title:'Цветная бомбочка 3×3',    cost:10,  role:'user', type:'consumable' },
   { id: 'cooldown_boost_25', title:'Ускоритель −25%',    cost:10,  role:'user', type:'cooldown_boost', pct:25, durationMin:15 },
   { id: 'cooldown_boost_50', title:'Ускоритель −50%',    cost:25,  role:'user', type:'cooldown_boost', pct:50, durationMin:15 },
   // VIP
@@ -675,6 +666,9 @@ if (mongoose) {
     // Единственный трафарет, которым клан делится прямо сейчас.
     // Формат: { owner: '<username>', emoji: '<emoji>', stencil: {...} } или null.
     shared_stencil: { type: Object, default: null },
+    // До трёх одновременных трафаретов. shared_stencil оставлен для миграции
+    // старых кланов и совместимости с уже сохранёнными документами.
+    shared_stencils: { type: Array, default: [] },
 
     // Новые настройки клана
     icon:           { type: String, default: '🏴' },
@@ -868,6 +862,8 @@ const CLAN_MEMBER_LIMIT_TIERS = [
 const CLAN_SHOP_ITEMS = [
   { id:'banner_static',   cost:60,  requires:null },
   { id:'banner_animated', cost:150, requires:'banner_static' },
+  { id:'clan_stencil_slot_2', cost:100, requires:null },
+  { id:'clan_stencil_slot_3', cost:250, requires:'clan_stencil_slot_2' },
 ];
 
 const CLAN_ANIMATED_BANNER_EXT = ['.gif', '.webp', '.apng'];
@@ -942,6 +938,24 @@ function clanPriorityOf(clan, username) {
   return rank ? (rank.priority || 0) : 0;
 }
 
+function clanStencilSlots(clan) {
+  if (!clan) return 1;
+  const owned = clan.shop_items || [];
+  if (owned.includes('clan_stencil_slot_3')) return 3;
+  if (owned.includes('clan_stencil_slot_2')) return 2;
+  return 1;
+}
+
+function normalizeClanStencils(clan) {
+  if (!clan) return [];
+  const list = Array.isArray(clan.shared_stencils) ? clan.shared_stencils.filter(Boolean) : [];
+  if (!list.length && clan.shared_stencil) list.push(clan.shared_stencil);
+  clan.shared_stencils = list.slice(0, clanStencilSlots(clan));
+  // legacy field keeps the first slot available to clients during rollout.
+  clan.shared_stencil = clan.shared_stencils[0] || null;
+  return clan.shared_stencils;
+}
+
 async function dbGetClan(name) {
   if (ClanModel) {
     try {
@@ -951,6 +965,7 @@ async function dbGetClan(name) {
   }
   const clan = ensureClanRanks(clans[name] || null);
   if (clan) {
+    normalizeClanStencils(clan);
     // Карточки участников (аватар/эмодзи/ранг/баннер) — раньше клиент брал
     // это только из cpUserCache (заполняется чатом/онлайн-списком), поэтому
     // офлайн-участник или тот, кто ни разу не писал в чат, показывался с
@@ -1583,8 +1598,8 @@ initDatabases().then(async () => {
   // silent=false) шлёт клиенту уведомление achievement_unlocked для тоста.
   // silent=true используется при логине — чтобы "досчитать" задним числом
   // уже выполненные условия у существующих игроков без спама уведомлениями.
-  async function checkAchievements(username, acc, { silent = false } = {}) {
-    const stats = buildAchievementStats(acc);
+  async function checkAchievements(username, acc, { silent = false, sessionPixels = 0 } = {}) {
+    const stats = buildAchievementStats(acc, { sessionPixels });
     const already = new Set(acc.unlocked_achievements || []);
     const newly = [];
     for (const a of ACHIEVEMENTS_DEF) {
@@ -1710,9 +1725,11 @@ initDatabases().then(async () => {
   // висеть на холсте у всех навечно без возможности его убрать.
   async function clearClanStencilIfOwner(clanName, username) {
     const clan = await dbGetClan(clanName);
-    if (!clan || !clan.shared_stencil || clan.shared_stencil.owner !== username) return;
-    await dbSaveClan(clanName, { active_stencil: null, shared_stencil: null });
-    broadcastToClan(clanName, JSON.stringify({ action:'clan_stencil_update', stencil: null, from: username, removed: true }), null);
+    if (!clan) return;
+    const remaining = normalizeClanStencils(clan).filter(s => s.owner !== username);
+    if (remaining.length === clan.shared_stencils.length) return;
+    await dbSaveClan(clanName, { active_stencil: remaining[0]?.stencil || null, shared_stencil: remaining[0] || null, shared_stencils: remaining });
+    broadcastToClan(clanName, JSON.stringify({ action:'clan_stencil_update', stencils: remaining, from: username, removed: true }), null);
   }
 
   setInterval(() => {
@@ -1764,8 +1781,13 @@ initDatabases().then(async () => {
   }
 
   async function useConsumable(ws, itemId, reqData) {
-    const acc = ws.userData;
-    const inv = acc.inventory || {};
+    // Не используем снимок ws.userData: при двух открытых вкладках он может
+    // отставать от покупки в другой вкладке. Берём единый актуальный аккаунт
+    // из runtime-кэша и создаём отдельную копию инвентаря для этой операции.
+    const acc = await dbGetAccount(ws.userData.username);
+    if (!acc) return;
+    ws.userData = acc;
+    const inv = { ...(acc.inventory || {}) };
     if (!inv[itemId] || inv[itemId] <= 0) {
       ws.send(JSON.stringify({ action:'toast', message:'Предмет не найден в инвентаре' })); return;
     }
@@ -1851,9 +1873,39 @@ initDatabases().then(async () => {
     await dbSaveAccount(acc.username, { inventory: inv });
 
     if (pixels.length > 0) {
-      // Клетки от бомбочек и других расходников не принадлежат игроку
-      // и не должны учитываться в его статистике пикселей.
-      pixels.forEach(p => clearPixelOwner(p.x, p.y));
+      // Только бомбочки считаются личной установкой пикселей. Ластик и
+      // зеркальный штамп остаются служебными эффектами без начисления.
+      const isBomb = itemId === 'bomb_3x3' || itemId === 'rainbow_5x5';
+      if (isBomb) {
+        // Клетки бомбочки принадлежат применившему игроку и при наведении
+        // показывают его как автора.
+        pixels.forEach(p => setPixelOwner(p.x, p.y, acc.username, acc.emoji || '👾', getAvatarUrl(acc)));
+
+        const placedCount = pixels.length;
+        const prevRank = acc.rank;
+        acc.pixels = (acc.pixels || 0) + placedCount;
+        acc.coins  = (acc.coins || 0) + placedCount * COINS_PER_PIXEL;
+        acc.xp     = (acc.xp || 0) + placedCount;
+        acc.rank   = getRank(acc.xp).name;
+        accounts[acc.username] = { ...accounts[acc.username], pixels: acc.pixels, coins: acc.coins, xp: acc.xp, rank: acc.rank };
+        dirtyAccounts.add(acc.username);
+
+        if (acc.clan) {
+          if (!clans[acc.clan]) clans[acc.clan] = { pixels: 0 };
+          clans[acc.clan].pixels = (clans[acc.clan].pixels || 0) + placedCount;
+          dirtyClans.add(acc.clan);
+        }
+
+        ws.send(JSON.stringify({ action:'coins_update', coins: acc.coins, pixels: acc.pixels, xp: acc.xp }));
+        if (acc.rank !== prevRank) {
+          const rankInfo = getRank(acc.xp);
+          const hasReward = (RANK_REWARDS[acc.rank] || []).length > 0;
+          ws.send(JSON.stringify({ action:'rank_up', rank: acc.rank, icon: rankInfo.icon, xp: acc.xp, claimable: hasReward }));
+        }
+        ws.sessionPixels += placedCount;
+        checkAchievements(acc.username, acc, { sessionPixels: ws.sessionPixels }).catch(() => {});
+      }
+
       isDirty = true;
       sendPixelBulk(pixels);
       recordPixelsForTimelapse(pixels);
@@ -1871,6 +1923,9 @@ initDatabases().then(async () => {
   //  WS CONNECTION
   // ══════════════════════════════════════════════════════════
   wss.on('connection', (ws) => {
+    // Статистика одной игровой сессии не пишется в БД и начинается с нуля
+    // при каждом новом WebSocket-соединении.
+    ws.sessionPixels = 0;
     ws.isAuthorized = false;
     ws.userData     = null;
 
@@ -1955,7 +2010,8 @@ initDatabases().then(async () => {
           // Ачивки проверяем на каждый пиксель, но это дёшево (просто сравнения
           // в памяти) — запись в БД происходит, только если реально что-то
           // разблокировалось. Не await'им, чтобы не тормозить приём пикселей.
-          checkAchievements(acc.username, acc).catch(() => {});
+          ws.sessionPixels += 1;
+          checkAchievements(acc.username, acc, { sessionPixels: ws.sessionPixels }).catch(() => {});
         }
         return;
       }
@@ -2576,7 +2632,7 @@ initDatabases().then(async () => {
           await dbSaveClan(name, { 
              name, tag: tag||name.slice(0,4).toUpperCase(), description: description||'', 
              message_of_day:'', leader: ws.userData.username, members:[ws.userData.username], 
-             join_requests:[], pixels:0, share_cursor:false, active_stencil:null, shared_stencil:null,
+             join_requests:[], pixels:0, share_cursor:false, active_stencil:null, shared_stencil:null, shared_stencils:[],
              icon: '🏴', tag_color: '#818cf8', join_type: 'open', min_pixels: 0, is_public: true, social_link: '',
              banner_url: null, banner_crop_x: 0, banner_crop_y: 0, banner_crop_w: 1, banner_crop_h: 1,
              ranks: defaultClanRanks(), member_roles: {},
@@ -3006,36 +3062,29 @@ initDatabases().then(async () => {
           if (!ws.isAuthorized || !ws.userData.clan) return;
           const clan = await dbGetClan(ws.userData.clan);
           if (!clan) return;
-          const existing = clan.shared_stencil || null;
-          // В клане может быть только ОДИН активный трафарет одновременно.
-          // Менять/обновлять его может только текущий владелец (или кто угодно,
-          // если трафарета сейчас нет вообще).
-          if (existing && existing.owner !== ws.userData.username) {
-            ws.send(JSON.stringify({ action:'toast', message:`В клане уже есть трафарет от ${existing.owner}. Попросите снять его или подождите.` }));
-            return;
-          }
           const sharedStencil = { owner: ws.userData.username, emoji: ws.userData.emoji || '👾', avatar: getAvatarUrl(ws.userData), stencil: data.stencil };
-          await dbSaveClan(ws.userData.clan, { active_stencil: data.stencil, shared_stencil: sharedStencil });
-          // Уведомляем всех (включая отправителя) — у всех обновляется единый трафарет клана.
-          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_stencil_update', stencil: sharedStencil, from: ws.userData.username }), null);
+          const stencils = normalizeClanStencils(clan);
+          const existingIndex = stencils.findIndex(s => s.owner === ws.userData.username);
+          if (existingIndex >= 0) stencils[existingIndex] = sharedStencil;
+          else if (stencils.length < clanStencilSlots(clan)) stencils.push(sharedStencil);
+          else { ws.send(JSON.stringify({ action:'toast', message:'Все слоты клановых трафаретов заняты. Откройте следующий слот в магазине клана.' })); return; }
+          await dbSaveClan(ws.userData.clan, { active_stencil: sharedStencil.stencil, shared_stencil: stencils[0] || null, shared_stencils: stencils });
+          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_stencil_update', stencils, from: ws.userData.username }), null);
         }
         else if (action === 'clan_unshare_stencil') {
           if (!ws.isAuthorized || !ws.userData.clan) return;
           const clan = await dbGetClan(ws.userData.clan);
           if (!clan) return;
-          const existing = clan.shared_stencil || null;
-          if (!existing) return;
-          if (existing.owner !== ws.userData.username) {
-            ws.send(JSON.stringify({ action:'toast', message:'Снять трафарет может только его владелец' }));
-            return;
-          }
-          await dbSaveClan(ws.userData.clan, { active_stencil: null, shared_stencil: null });
-          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_stencil_update', stencil: null, from: ws.userData.username, removed: true }), null);
+          const stencils = normalizeClanStencils(clan);
+          const remaining = stencils.filter(s => s.owner !== ws.userData.username);
+          if (remaining.length === stencils.length) { ws.send(JSON.stringify({ action:'toast', message:'Снять трафарет может только его владелец' })); return; }
+          await dbSaveClan(ws.userData.clan, { active_stencil: remaining[0]?.stencil || null, shared_stencil: remaining[0] || null, shared_stencils: remaining });
+          broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_stencil_update', stencils: remaining, from: ws.userData.username, removed: true }), null);
         }
         else if (action === 'clan_get_stencils') {
           if (!ws.isAuthorized || !ws.userData.clan) return;
           const clan = await dbGetClan(ws.userData.clan);
-          ws.send(JSON.stringify({ action:'clan_stencils_list', stencil: (clan && clan.shared_stencil) || null }));
+          ws.send(JSON.stringify({ action:'clan_stencils_list', stencils: clan ? normalizeClanStencils(clan) : [] }));
         }
 
         else if (action === 'clan_get') {
