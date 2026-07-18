@@ -306,6 +306,9 @@ if (cloudinary && process.env.CLOUDINARY_CLOUD_NAME) {
 
 // ── COIN REWARDS ───────────────────────────────────────────
 const COINS_PER_PIXEL = 0.1;   // 1 монета за 10 пикселей
+// Количество цветов клиента. Значения передаются в одном байте, поэтому
+// расширение палитры не меняет формат пиксельных пакетов.
+const PALETTE_COLOR_COUNT = 34;
 
 // ── ЗВАНИЯ (Этап 4: переход на опыт) ──
 // min теперь измеряется в очках ОПЫТА (xp), а не в пикселях. 1 поставленный
@@ -386,6 +389,10 @@ const RANK_REWARDS = {
 // старый claimed_ranks-id для другой награды и она показывается как уже
 // полученная, хотя игрок её не забирал (баг с "градиентный баннер сам
 // стал получен после клейма VIP").
+// После последнего звания игрок продолжает получать награды за опыт.
+// Номер цикла хранится отдельно, поэтому каждый порог можно забрать один раз.
+const REPEAT_XP_REWARD = { startXp: 20000, stepXp: 1000, coins: 200 };
+
 function rewardKey(reward) {
   if (!reward) return 'none';
   if (reward.type === 'coins')     return `coins_${reward.amount}`;
@@ -645,6 +652,7 @@ if (mongoose) {
     xp:                    { type: Number,   default: 0 },
     unlocked_achievements: { type: [String], default: [] },
     claimed_ranks:         { type: [String], default: [] },
+    claimed_xp_cycles:     { type: [Number], default: [] },
     claimed_achievements:  { type: [String], default: [] },
 
     // ── ВРЕМЕННЫЙ VIP (промежуточные звания-награды) ──
@@ -1833,7 +1841,7 @@ initDatabases().then(async () => {
       for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
         const nx = px+dx, ny = py+dy;
         if (nx>=0&&nx<CANVAS_WIDTH&&ny>=0&&ny<CANVAS_HEIGHT) {
-          const rc = Math.floor(Math.random()*32); 
+          const rc = Math.floor(Math.random()*PALETTE_COLOR_COUNT);
           canvasData[ny*CANVAS_WIDTH+nx] = rc;
           pixels.push({x:nx, y:ny, c:rc});
         }
@@ -1965,7 +1973,7 @@ initDatabases().then(async () => {
         const y       = (message[2] << 8) | message[3];
         const colorIdx = message[4];
 
-        if (x >= 0 && x < CANVAS_WIDTH && y >= 0 && y < CANVAS_HEIGHT && colorIdx >= 0 && colorIdx < 32) {
+        if (x >= 0 && x < CANVAS_WIDTH && y >= 0 && y < CANVAS_HEIGHT && colorIdx >= 0 && colorIdx < PALETTE_COLOR_COUNT) {
           canvasData[y * CANVAS_WIDTH + x] = colorIdx;
           setPixelOwner(x, y, acc.username, acc.emoji || '👾', getAvatarUrl(acc));
           pixelBatchBuffer.push({ x, y, c: colorIdx });
@@ -2072,6 +2080,7 @@ initDatabases().then(async () => {
                   xp:                  0,
                   unlocked_achievements: [],
                   claimed_ranks:         [],
+                  claimed_xp_cycles:     [],
                   claimed_achievements:  [],
                 };
                 await dbSaveAccount(username, acc);
@@ -2138,6 +2147,7 @@ initDatabases().then(async () => {
                 xp:              ws.userData.xp        || 0,
                 unlocked_achievements: ws.userData.unlocked_achievements || [],
                 claimed_ranks:         ws.userData.claimed_ranks || [],
+                claimed_xp_cycles:     ws.userData.claimed_xp_cycles || [],
                 claimed_achievements:  ws.userData.claimed_achievements || [],
                 vip_temp_until:  ws.userData.vip_temp_until || 0,
                 purchased_items: clientItems,
@@ -2181,7 +2191,7 @@ initDatabases().then(async () => {
             if (existing) { ws.send(JSON.stringify({ action:'toast', message:'Ник уже занят!' })); return; }
             let role = 'user';
             if ((username === 'd3cord' && email === 'otarasik10@gmail.com') || username === ADMIN_USERNAME) role = 'admin';
-            const newUser = { username, password, email, role, pixels: 0, rank: 'Новичок', emoji: '👾', banned: false, timeout_until: 0, coins: 0, clan: '', inventory: {}, upgrades: [], cooldownBoostPct: 0, cooldownBoostUntil: 0, active_stencil: null, saved_stencils: [], friends: [], friend_requests_in: [], friend_requests_out: [], dm_reads: {}, banner_id: null, owned_banners: [], xp: 0, unlocked_achievements: [], claimed_ranks: [], claimed_achievements: [] };
+            const newUser = { username, password, email, role, pixels: 0, rank: 'Новичок', emoji: '👾', banned: false, timeout_until: 0, coins: 0, clan: '', inventory: {}, upgrades: [], cooldownBoostPct: 0, cooldownBoostUntil: 0, active_stencil: null, saved_stencils: [], friends: [], friend_requests_in: [], friend_requests_out: [], dm_reads: {}, banner_id: null, owned_banners: [], xp: 0, unlocked_achievements: [], claimed_ranks: [], claimed_xp_cycles: [], claimed_achievements: [] };
             await dbSaveAccount(username, newUser);
             ws.userData = { ...newUser };
           } else {
@@ -2236,6 +2246,7 @@ initDatabases().then(async () => {
             xp:              ws.userData.xp        || 0,
             unlocked_achievements: ws.userData.unlocked_achievements || [],
             claimed_ranks:         ws.userData.claimed_ranks || [],
+            claimed_xp_cycles:     ws.userData.claimed_xp_cycles || [],
             claimed_achievements:  ws.userData.claimed_achievements || [],
             vip_temp_until:  ws.userData.vip_temp_until || 0,
             purchased_items: clientItems,
@@ -2282,7 +2293,13 @@ initDatabases().then(async () => {
         }
 
         else if (action === 'get_leaderboard') {
-          const allAccs  = await dbGetAllAccounts();
+          const persisted = await dbGetAllAccounts();
+          // Mongo получает пиксели пакетами, поэтому сразу после бомбочки
+          // в БД ещё может лежать старое значение. Поверх него накладываем
+          // актуальный runtime-кэш — лидерборд обновляется мгновенно.
+          const byUsername = new Map(persisted.map(a => [a.username, a]));
+          Object.values(accounts).forEach(a => byUsername.set(a.username, { ...(byUsername.get(a.username) || {}), ...a }));
+          const allAccs = Array.from(byUsername.values());
           const players  = allAccs
             .map(a => ({ username: a.username, pixels: a.pixels||0, emoji: a.emoji||'👾', avatar: getAvatarUrl(a), banner: a.banner_id||null, rank: a.rank||'Новичок' }))
             .sort((a, b) => b.pixels - a.pixels).slice(0, 30);
@@ -3219,6 +3236,24 @@ initDatabases().then(async () => {
           if (ws.userData.clan) broadcastToClan(ws.userData.clan, JSON.stringify({ action:'clan_data', clan: await dbGetClan(ws.userData.clan) }), null);
         }
 
+        // ── ПОВТОРЯЕМАЯ НАГРАДА ПОСЛЕ «БОГА ПИКСЕЛЕЙ» ──
+        else if (action === 'claim_xp_cycle_reward') {
+          if (!ws.isAuthorized) return;
+          const acc = await dbGetAccount(ws.userData.username);
+          if (!acc) return;
+          const maxCycle = Math.floor(((acc.xp || 0) - REPEAT_XP_REWARD.startXp) / REPEAT_XP_REWARD.stepXp);
+          const requested = Math.floor(Number(data.cycle));
+          if (!Number.isInteger(requested) || requested < 1 || requested > maxCycle) { ws.send(JSON.stringify({ action:'toast', message:'Награда ещё не открыта' })); return; }
+          const claimed = acc.claimed_xp_cycles || [];
+          if (claimed.includes(requested)) { ws.send(JSON.stringify({ action:'toast', message:'Награда уже получена' })); return; }
+          const newCoins = (acc.coins || 0) + REPEAT_XP_REWARD.coins;
+          const newClaimed = [...claimed, requested];
+          await dbSaveAccount(acc.username, { coins: newCoins, claimed_xp_cycles: newClaimed });
+          acc.coins = newCoins; acc.claimed_xp_cycles = newClaimed;
+          ws.userData.coins = newCoins; ws.userData.claimed_xp_cycles = newClaimed;
+          ws.send(JSON.stringify({ action:'xp_cycle_reward_claimed', cycle: requested, coins: newCoins, claimed_xp_cycles: newClaimed, message:`✨ Получено +${REPEAT_XP_REWARD.coins} монет за ${REPEAT_XP_REWARD.startXp + requested * REPEAT_XP_REWARD.stepXp} XP` }));
+        }
+
         // ── ЗАБРАТЬ НАГРАДУ ЗА ЗВАНИЕ (Этап 4) ──
         // Игрок жмёт кнопку "Забрать" в модалке "Звания и награды" на уже
         // достигнутом (по xp) звании. Проверяем порог, проверяем что ещё не
@@ -3754,7 +3789,7 @@ initDatabases().then(async () => {
                 active_stencil: null, saved_stencils: [],
                 friends: [], friend_requests_in: [], friend_requests_out: [], dm_reads: {},
                 banner_id: null, owned_banners: [],
-                unlocked_achievements: [], claimed_ranks: [], claimed_achievements: [],
+                unlocked_achievements: [], claimed_ranks: [], claimed_xp_cycles: [], claimed_achievements: [],
                 vip_temp_until: 0, vip_temp_prev_role: '',
                 banned: false, timeout_until: 0,
               };
