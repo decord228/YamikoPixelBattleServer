@@ -4440,12 +4440,19 @@ initDatabases().then(async () => {
     ws.on('close', () => {
       broadcastOnlineCount();
       if (ws.isAuthorized && ws.userData?.username) notifyFriendsPresence(ws.userData.username, false);
+      // Discord Activity может быть перезапущена без предупреждения. Сразу
+      // фиксируем принятые сервером пиксели, а не ждём фонового таймера.
+      if (isDirty || ownersDirty) {
+        persistCanvas().catch(e => console.error('❌ Canvas save on disconnect:', e.message));
+      }
     });
     ws.on('error', () => {});
   });
 
   // ── TIMERS ──────────────────────────────────────────────
-  setInterval(persistCanvas, 10000);
+  // Короткое окно потери данных для активной игры; параллельные записи
+  // сериализуются внутри persistCanvas(), поэтому старый снимок не перетрёт новый.
+  setInterval(persistCanvas, 5000);
 
   process.on('SIGINT',  async () => { isDirty = true; await persistCanvas(); process.exit(0); });
   process.on('SIGTERM', async () => { isDirty = true; await persistCanvas(); process.exit(0); });
