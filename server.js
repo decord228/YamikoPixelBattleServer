@@ -3482,7 +3482,8 @@ initDatabases().then(async () => {
           const cmd = data.cmd;
 
           if (cmd === 'get_users') {
-            const requestedPage = Number(data.page) || 1, limit = 10;
+            const recipientPicker = data.recipient_picker === true;
+            const requestedPage = Number(data.page) || 1, limit = recipientPicker ? 1000 : 10;
             const query = typeof data.query === 'string' ? data.query.trim().toLocaleLowerCase('ru-RU') : '';
             const allAccs = await dbGetAllAccounts();
             const matchingAccs = query
@@ -3504,7 +3505,7 @@ initDatabases().then(async () => {
             const totalPages = Math.ceil(users.length / limit) || 1;
             const page = Math.min(Math.max(1, requestedPage), totalPages);
             const start      = (page - 1) * limit;
-            ws.send(JSON.stringify({ action:'admin_users_list', page, total_pages:totalPages, users:users.slice(start, start+limit), total:users.length, query }));
+            ws.send(JSON.stringify({ action:'admin_users_list', page, total_pages:totalPages, users:users.slice(start, start+limit), total:users.length, query, recipient_picker:recipientPicker }));
           }
 
           else if (cmd === 'ban' || cmd === 'unban') {
