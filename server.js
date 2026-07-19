@@ -27,6 +27,7 @@ const PORT           = process.env.PORT || 3000;
 const ADMIN_USERNAME = 'Yamiko';
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const DISCORD_ACTIVITY_URL = process.env.DISCORD_ACTIVITY_URL || 'https://decord228.github.io/YamikoPixelBattle';
+const DISCORD_TEST_USER_ID = '409071932244492308';
 const CANVAS_FILE       = path.join(__dirname, 'canvas.bin');
 const META_FILE         = path.join(__dirname, 'canvas_meta.json');
 const PIXEL_OWNERS_FILE = path.join(__dirname, 'pixel_owners.bin');
@@ -279,6 +280,29 @@ async function sendDiscordCampaign(content) {
     await wait(550);
   }
   return result;
+}
+
+async function sendDiscordCampaignTest(content) {
+  if (!DISCORD_BOT_TOKEN) throw new Error('Не задана переменная DISCORD_BOT_TOKEN');
+  const messagePayload = {
+    flags: 32768,
+    components: [{ type: 17, accent_color: 0x6366F1, components: [
+      { type: 10, content },
+      { type: 14, divider: true, spacing: 1 },
+      { type: 1, components: [{ type: 2, style: 5, label: 'Присоединиться к Пиксель Батлу', url: DISCORD_ACTIVITY_URL }] },
+    ] }],
+  };
+  const channelResponse = await fetch('https://discord.com/api/v10/users/@me/channels', {
+    method: 'POST', headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ recipient_id: DISCORD_TEST_USER_ID }),
+  });
+  if (!channelResponse.ok) throw new Error(`Discord не открыл ЛС (${channelResponse.status})`);
+  const channel = await channelResponse.json();
+  const messageResponse = await fetch(`https://discord.com/api/v10/channels/${channel.id}/messages`, {
+    method: 'POST', headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(messagePayload),
+  });
+  if (!messageResponse.ok) throw new Error(`Discord не отправил сообщение (${messageResponse.status})`);
 }
 
 function getPixelOwner(x, y) {
@@ -4123,6 +4147,17 @@ initDatabases().then(async () => {
               ws.send(JSON.stringify({ action:'discord_campaign_result', ...result }));
             } catch (error) {
               ws.send(JSON.stringify({ action:'toast', message:`Ошибка Discord-рассылки: ${error.message}` }));
+            }
+          }
+
+          else if (cmd === 'discord_campaign_test') {
+            const msg = String(data.params || '').trim() || 'Тестовое сообщение Pixel Battle';
+            if (msg.length > 2000) { ws.send(JSON.stringify({ action:'toast', message:'Сообщение не должно быть длиннее 2000 символов' })); return; }
+            try {
+              await sendDiscordCampaignTest(msg);
+              ws.send(JSON.stringify({ action:'discord_campaign_result', test:true, sent:1, failed:0 }));
+            } catch (error) {
+              ws.send(JSON.stringify({ action:'toast', message:`Ошибка тестового сообщения: ${error.message}` }));
             }
           }
 
