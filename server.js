@@ -864,6 +864,15 @@ if (Redis && process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_RES
   redis = new Redis({ url: process.env.UPSTASH_REDIS_REST_URL, token: process.env.UPSTASH_REDIS_REST_TOKEN });
   console.log('✅ Upstash Redis подключён');
 }
+// Цвета и авторы должны переключаться как один снимок. Указатель меняется
+// только после полной записи обеих частей, поэтому рестарт не склеит их из
+// разных моментов времени.
+const BOARD_SNAPSHOT_POINTER_KEY = 'pixel_board_snapshot_current_v2';
+let boardSnapshotSequence = 0;
+function boardSnapshotKeys(id) {
+  const base = `pixel_board_snapshot_v2:${id}`;
+  return { canvas: `${base}:canvas`, owners: `${base}:owners`, ids: `${base}:owner_ids` };
+}
 
 // ── DB HELPERS ─────────────────────────────────────────────
 async function dbGetAccount(username) {
@@ -1381,7 +1390,20 @@ async function initDatabases() {
 
   // Метаданные холста
   let metaLoaded = false;
+  let boardSnapshotRef = null;
   if (redis) {
+    try {
+      const raw = await redis.get(BOARD_SNAPSHOT_POINTER_KEY);
+      const ref = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null;
+      if (ref?.id && ref?.w && ref?.h) {
+        boardSnapshotRef = ref;
+        CANVAS_WIDTH = ref.w;
+        CANVAS_HEIGHT = ref.h;
+        metaLoaded = true;
+      }
+    } catch(e) { console.error('❌ Redis board snapshot pointer:', e.message); }
+  }
+  if (redis && !metaLoaded) {
     try {
       const raw = await redis.get('canvas_meta');
       if (raw) {
@@ -1403,7 +1425,27 @@ async function initDatabases() {
   pixelOwners  = new Uint16Array(CANVAS_SIZE);
 
   let canvasLoaded = false;
-  if (redis) {
+  let snapshotOwnersBuffer = null;
+  let snapshotOwnerIds = null;
+  if (redis && boardSnapshotRef) {
+    try {
+      const keys = boardSnapshotKeys(boardSnapshotRef.id);
+      const [canvasB64, ownersB64, idsRaw] = await Promise.all([
+        redis.get(keys.canvas), redis.get(keys.owners), redis.get(keys.ids)
+      ]);
+      const canvasBuf = canvasB64 ? Buffer.from(canvasB64, 'base64') : null;
+      const ownersBuf = ownersB64 ? Buffer.from(ownersB64, 'base64') : null;
+      const ids = idsRaw ? (typeof idsRaw === 'string' ? JSON.parse(idsRaw) : idsRaw) : null;
+      if (canvasBuf?.length === CANVAS_SIZE && ownersBuf?.length === CANVAS_SIZE * 2 && Array.isArray(ids)) {
+        canvasData.set(canvasBuf);
+        snapshotOwnersBuffer = ownersBuf;
+        snapshotOwnerIds = ids;
+        canvasLoaded = true;
+        console.log('✅ Холст и авторы загружены из единого снимка Redis');
+      }
+    } catch(e) { console.error('❌ Redis board snapshot:', e.message); }
+  }
+  if (redis && !canvasLoaded) {
     try {
       console.log('⏳ Загружаем холст из Redis...');
       const b64 = await redis.get('pixel_canvas');
@@ -1432,7 +1474,18 @@ async function initDatabases() {
   // мало относительно лимита Upstash в 256 МБ. Файлы остаются как
   // локальный fallback/кэш на случай недоступности Redis.
   let ownersLoaded = false;
-  if (redis) {
+  if (snapshotOwnersBuffer && snapshotOwnerIds) {
+    let maxId = 0;
+    for (const entry of snapshotOwnerIds) {
+      ownerIdMap.set(entry.username, entry.id);
+      ownerDataMap.set(entry.id, { username: entry.username, emoji: entry.emoji || '👾', avatar: entry.avatar || null });
+      if (entry.id > maxId) maxId = entry.id;
+    }
+    nextOwnerId = maxId + 1;
+    pixelOwners.set(new Uint16Array(snapshotOwnersBuffer.buffer, snapshotOwnersBuffer.byteOffset, CANVAS_SIZE));
+    ownersLoaded = true;
+  }
+  if (redis && !ownersLoaded) {
     try {
       const idsRaw = await redis.get('pixel_owner_ids');
       const ownersB64 = await redis.get('pixel_owners');
@@ -1487,8 +1540,6 @@ async function initDatabases() {
 
 // ── PERSIST ────────────────────────────────────────────────
 async function persistCanvas() {
-  // Не даём нескольким async-сохранениям записать старый снимок поверх нового.
-  // Все изменения, пришедшие во время записи, сохраняются следующим проходом.
   if (canvasPersistPromise) return canvasPersistPromise;
   canvasPersistPromise = (async () => {
     do {
@@ -1498,35 +1549,43 @@ async function persistCanvas() {
       isDirty = false;
       ownersDirty = false;
 
-      if (saveCanvas) {
-        // Копия обязательна: живой Uint8Array может измениться, пока Redis ждёт ответа.
-        const canvasSnapshot = Buffer.from(canvasData);
-        const b64  = canvasSnapshot.toString('base64');
-        const meta = JSON.stringify({ w: CANVAS_WIDTH, h: CANVAS_HEIGHT });
-        if (redis) {
-          try { await redis.set('canvas_meta', meta); await redis.set('pixel_canvas', b64); } catch(e) { console.error('❌ Redis save:', e.message); }
-        }
-        try { fs.writeFileSync(META_FILE, meta); fs.writeFileSync(CANVAS_FILE, canvasSnapshot); } catch(e) {}
+      // Всегда создаём обе части из одного момента времени. Указатель в Redis
+      // переключается только в самом конце — это атомарный commit снимка.
+      const canvasSnapshot = Buffer.from(canvasData);
+      const ownerBuf = Buffer.from(pixelOwners.buffer.slice(pixelOwners.byteOffset, pixelOwners.byteOffset + pixelOwners.byteLength));
+      const idsArr = [];
+      for (const [username, id] of ownerIdMap.entries()) {
+        const data = ownerDataMap.get(id);
+        idsArr.push({ id, username, emoji: data?.emoji || '👾', avatar: data?.avatar || null });
+      }
+      const idsJson = JSON.stringify(idsArr);
+      const meta = JSON.stringify({ w: CANVAS_WIDTH, h: CANVAS_HEIGHT });
+
+      if (redis) {
+        let previous = null;
+        try {
+          const previousRaw = await redis.get(BOARD_SNAPSHOT_POINTER_KEY);
+          previous = previousRaw ? (typeof previousRaw === 'string' ? JSON.parse(previousRaw) : previousRaw) : null;
+        } catch(e) { console.error('❌ Redis board snapshot pointer read:', e.message); }
+        const snapshotId = `${Date.now().toString(36)}-${(++boardSnapshotSequence).toString(36)}`;
+        const keys = boardSnapshotKeys(snapshotId);
+        try {
+          await redis.set(keys.canvas, canvasSnapshot.toString('base64'));
+          await redis.set(keys.owners, ownerBuf.toString('base64'));
+          await redis.set(keys.ids, idsJson);
+          // Только эта операция делает новую версию видимой после рестарта.
+          await redis.set(BOARD_SNAPSHOT_POINTER_KEY, JSON.stringify({ id:snapshotId, w:CANVAS_WIDTH, h:CANVAS_HEIGHT }));
+          if (previous?.id && previous.id !== snapshotId) {
+            const old = boardSnapshotKeys(previous.id);
+            try { await redis.del(old.canvas, old.owners, old.ids); } catch (_) {}
+          }
+        } catch(e) { console.error('❌ Redis board snapshot save:', e.message); }
       }
 
-      if (saveOwners) {
-        // Копируем и авторов, иначе новый штамп мог бы попасть в старый снимок.
-        const ownerBuf = Buffer.from(pixelOwners.buffer.slice(pixelOwners.byteOffset, pixelOwners.byteOffset + pixelOwners.byteLength));
-        const idsArr = [];
-        for (const [username, id] of ownerIdMap.entries()) {
-          const data = ownerDataMap.get(id);
-          idsArr.push({ id, username, emoji: data?.emoji || '👾', avatar: data?.avatar || null });
-        }
-        const idsJson = JSON.stringify(idsArr);
-        if (redis) {
-          try {
-            await redis.set('pixel_owners', ownerBuf.toString('base64'));
-            await redis.set('pixel_owner_ids', idsJson);
-          } catch(e) { console.error('❌ Redis pixel owners save:', e.message); }
-        }
-        try { fs.writeFileSync(PIXEL_OWNERS_FILE, ownerBuf); } catch(e) { console.error('❌ pixel_owners.bin save:', e.message); }
-        try { fs.writeFileSync(PIXEL_IDS_FILE, idsJson); } catch(e) { console.error('❌ pixel_owner_ids.json save:', e.message); }
-      }
+      // Локальные файлы остаются резервной копией для запуска без Redis.
+      try { fs.writeFileSync(META_FILE, meta); fs.writeFileSync(CANVAS_FILE, canvasSnapshot); } catch(e) {}
+      try { fs.writeFileSync(PIXEL_OWNERS_FILE, ownerBuf); } catch(e) { console.error('❌ pixel_owners.bin save:', e.message); }
+      try { fs.writeFileSync(PIXEL_IDS_FILE, idsJson); } catch(e) { console.error('❌ pixel_owner_ids.json save:', e.message); }
     } while (isDirty || ownersDirty);
   })().finally(() => { canvasPersistPromise = null; });
   return canvasPersistPromise;
