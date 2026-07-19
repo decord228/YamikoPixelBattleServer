@@ -41,6 +41,9 @@ let CANVAS_SIZE   = CANVAS_WIDTH * CANVAS_HEIGHT;
 let canvasData    = null;
 let isDirty       = false;
 let canvasPersistPromise = null;
+// Наблюдаемое состояние последнего commit холста. Оно не попадает в
+// таймлапс и не влияет на его текущую запись.
+const boardPersistStatus = { lastSuccessAt:0, lastAttemptAt:0, lastSnapshotId:null, lastError:null, consecutiveFailures:0 };
 
 // ── PIXEL OWNERSHIP ────────────────────────────────────────
 // pixelOwners: Uint16Array[CANVAS_SIZE] — у каждого пикселя ID автора (0 = никто)
@@ -242,6 +245,22 @@ function setPixelOwner(x, y, username, emoji, avatar) {
   const id = getOrCreateOwnerId(username, emoji, avatar);
   pixelOwners[y * CANVAS_WIDTH + x] = id;
   ownersDirty = true;
+}
+
+// Все служебные операции над доской обязаны менять цвет и владельца вместе.
+// Справочник ownerDataMap намеренно не чистим: ID может использоваться в уже
+// сохранённых снимках, а неиспользуемая запись безвредна.
+function getPixelOwnerId(x, y) {
+  if (!pixelOwners || x < 0 || x >= CANVAS_WIDTH || y < 0 || y >= CANVAS_HEIGHT) return 0;
+  return pixelOwners[y * CANVAS_WIDTH + x] || 0;
+}
+function setPixelOwnerId(x, y, id) {
+  if (!pixelOwners || x < 0 || x >= CANVAS_WIDTH || y < 0 || y >= CANVAS_HEIGHT) return;
+  pixelOwners[y * CANVAS_WIDTH + x] = id || 0;
+  ownersDirty = true;
+}
+function clearPixelOwner(x, y) {
+  setPixelOwnerId(x, y, 0);
 }
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -1543,6 +1562,7 @@ async function persistCanvas() {
   if (canvasPersistPromise) return canvasPersistPromise;
   canvasPersistPromise = (async () => {
     do {
+      let retryLater = false;
       const saveCanvas = isDirty;
       const saveOwners = ownersDirty;
       if (!saveCanvas && !saveOwners) break;
@@ -1562,6 +1582,7 @@ async function persistCanvas() {
       const meta = JSON.stringify({ w: CANVAS_WIDTH, h: CANVAS_HEIGHT });
 
       if (redis) {
+        boardPersistStatus.lastAttemptAt = Date.now();
         let previous = null;
         try {
           const previousRaw = await redis.get(BOARD_SNAPSHOT_POINTER_KEY);
@@ -1579,13 +1600,29 @@ async function persistCanvas() {
             const old = boardSnapshotKeys(previous.id);
             try { await redis.del(old.canvas, old.owners, old.ids); } catch (_) {}
           }
-        } catch(e) { console.error('❌ Redis board snapshot save:', e.message); }
+          boardPersistStatus.lastSuccessAt = Date.now();
+          boardPersistStatus.lastSnapshotId = snapshotId;
+          boardPersistStatus.lastError = null;
+          boardPersistStatus.consecutiveFailures = 0;
+        } catch(e) {
+          // Не теряем dirty-флаги: следующий безопасный таймер повторит commit.
+          // Без этого сервер после ошибки Redis продолжал работу только в RAM.
+          boardPersistStatus.lastError = e.message;
+          boardPersistStatus.consecutiveFailures++;
+          isDirty = true;
+          ownersDirty = true;
+          retryLater = true;
+          console.error('❌ Redis board snapshot save:', e.message);
+        }
       }
 
       // Локальные файлы остаются резервной копией для запуска без Redis.
       try { fs.writeFileSync(META_FILE, meta); fs.writeFileSync(CANVAS_FILE, canvasSnapshot); } catch(e) {}
       try { fs.writeFileSync(PIXEL_OWNERS_FILE, ownerBuf); } catch(e) { console.error('❌ pixel_owners.bin save:', e.message); }
       try { fs.writeFileSync(PIXEL_IDS_FILE, idsJson); } catch(e) { console.error('❌ pixel_owner_ids.json save:', e.message); }
+      // Не делаем горячий бесконечный retry при сбое провайдера. Dirty-флаги
+      // сохранены, поэтому следующая попытка произойдёт по существующему таймеру.
+      if (retryLater) break;
     } while (isDirty || ownersDirty);
   })().finally(() => { canvasPersistPromise = null; });
   return canvasPersistPromise;
@@ -2126,7 +2163,10 @@ initDatabases().then(async () => {
         const nx = px+dx, ny = py+dy;
         if (nx>=0&&nx<CANVAS_WIDTH&&ny>=0&&ny<CANVAS_HEIGHT) {
           canvasData[ny*CANVAS_WIDTH+nx] = 0;
-          pixels.push({x:nx, y:ny, c:reqColor});
+          clearPixelOwner(nx, ny);
+          // В пакет и таймлапс идёт фактический записанный цвет, а не текущий
+          // выбранный игроком. Иначе до перезагрузки виден ложный рисунок.
+          pixels.push({x:nx, y:ny, c:0});
         }
       }
     } else if (itemId === 'mirror_stamp') {
@@ -2135,7 +2175,7 @@ initDatabases().then(async () => {
         for (let dx = -2; dx <= 2; dx++) {
           const nx = px+dx, ny = py+dy;
           if (nx>=0&&nx<CANVAS_WIDTH&&ny>=0&&ny<CANVAS_HEIGHT) {
-            temp.push({ dx, dy, c: canvasData[ny*CANVAS_WIDTH+nx] });
+            temp.push({ dx, dy, c: canvasData[ny*CANVAS_WIDTH+nx], ownerId: getPixelOwnerId(nx, ny) });
           }
         }
       }
@@ -2144,9 +2184,10 @@ initDatabases().then(async () => {
          const my = py + p.dy;
          if (mx>=0&&mx<CANVAS_WIDTH&&my>=0&&my<CANVAS_HEIGHT) {
             canvasData[my*CANVAS_WIDTH+mx] = p.c;
+            setPixelOwnerId(mx, my, p.c === 0 ? 0 : p.ownerId);
             pixels.push({x:mx, y:my, c:p.c});
-         }
-      }
+          }
+        }
     }
 
     inv[itemId]--;
@@ -2190,10 +2231,10 @@ initDatabases().then(async () => {
       }
 
       isDirty = true;
-      // Бомбочка меняет сразу несколько клеток: сначала фиксируем единый
-      // снимок, затем показываем результат. После обновления страницы не
-      // останется набора пикселей, который был виден только в памяти сервера.
-      if (itemId === 'bomb_3x3' || itemId === 'rainbow_5x5') await persistCanvas();
+      // Расходники меняют сразу несколько клеток: сначала фиксируем единый
+      // снимок, затем показываем результат. Это не меняет формат таймлапса:
+      // в него по-прежнему идут те же {x,y,c} фактические изменения.
+      await persistCanvas();
       sendPixelBulk(pixels);
       recordPixelsForTimelapse(pixels);
     }
@@ -2215,6 +2256,9 @@ initDatabases().then(async () => {
     ws.sessionPixels = 0;
     ws.isAuthorized = false;
     ws.userData     = null;
+    // Короткий кэш результатов делает повтор одного requestId идемпотентным:
+    // потерянный ответ можно запросить повторно без второго начисления награды.
+    ws.pixelRequestResults = new Map();
 
     sendCanvasSnapshot(ws);
     ws.send(JSON.stringify({ action: 'server_settings', settings: serverSettings }));
@@ -2233,11 +2277,23 @@ initDatabases().then(async () => {
         const x = (message[0] << 8) | message[1];
         const y = (message[2] << 8) | message[3];
         const colorIdx = message[4];
-        const rejectPixel = (reason) => {
+        if (requestId !== null && ws.pixelRequestResults.has(requestId)) {
+          ws.send(JSON.stringify(ws.pixelRequestResults.get(requestId)));
+          return;
+        }
+        const sendPixelResult = (result) => {
           if (requestId === null) return;
+          const payload = { action:'pixel_result', id:requestId, ...result };
+          ws.pixelRequestResults.set(requestId, payload);
+          // Ограниченный кэш: requestId уникален в рамках активного сокета,
+          // но карта не должна расти при долгой сессии.
+          if (ws.pixelRequestResults.size > 128) ws.pixelRequestResults.delete(ws.pixelRequestResults.keys().next().value);
+          ws.send(JSON.stringify(payload));
+        };
+        const rejectPixel = (reason, timing = null) => {
           const color = x >= 0 && x < CANVAS_WIDTH && y >= 0 && y < CANVAS_HEIGHT
             ? canvasData[y * CANVAS_WIDTH + x] : 0;
-          ws.send(JSON.stringify({ action:'pixel_result', id:requestId, ok:false, x, y, color, reason }));
+          sendPixelResult({ ok:false, x, y, color, reason, ...timing });
         };
         if (!ws.isAuthorized) { rejectPixel('Нет авторизации'); return; }
         const acc = ws.userData;
@@ -2259,7 +2315,10 @@ initDatabases().then(async () => {
         const effectiveCooldownMs = boostIsActive
           ? Math.max(0, Math.round(serverSettings.cooldownMs * (1 - Math.min(100, acc.cooldownBoostPct) / 100)))
           : serverSettings.cooldownMs;
-        if (acc._lastPixelAt && now - acc._lastPixelAt < effectiveCooldownMs) { rejectPixel('cooldown'); return; }
+        if (acc._lastPixelAt && now - acc._lastPixelAt < effectiveCooldownMs) {
+          rejectPixel('cooldown', { serverNow: now, nextAllowedAt: acc._lastPixelAt + effectiveCooldownMs });
+          return;
+        }
 
         if (x >= 0 && x < CANVAS_WIDTH && y >= 0 && y < CANVAS_HEIGHT && colorIdx >= 0 && colorIdx < PALETTE_COLOR_COUNT) {
           canvasData[y * CANVAS_WIDTH + x] = colorIdx;
@@ -2308,7 +2367,12 @@ initDatabases().then(async () => {
           // разблокировалось. Не await'им, чтобы не тормозить приём пикселей.
           ws.sessionPixels += 1;
           checkAchievements(acc.username, acc, { sessionPixels: ws.sessionPixels }).catch(() => {});
-          if (requestId !== null) ws.send(JSON.stringify({ action:'pixel_result', id:requestId, ok:true, x, y, color:colorIdx }));
+          // Кулдаун на клиенте запускается только после этого подтверждения.
+          // Время сервера исключает влияние неверных часов пользователя.
+          sendPixelResult({
+            ok:true, x, y, color:colorIdx,
+            serverNow: now, nextAllowedAt: now + effectiveCooldownMs,
+          });
         } else {
           rejectPixel('Некорректная клетка');
         }
@@ -2319,6 +2383,13 @@ initDatabases().then(async () => {
       try {
         const data   = JSON.parse(message.toString());
         const action = data.action || data.type;
+
+        // Восстановление авторитетного состояния после клиентского тайм-аута.
+        // Не требует авторизации и не влияет на таймлапс: это только чтение.
+        if (action === 'get_canvas_snapshot') {
+          sendCanvasSnapshot(ws);
+          return;
+        }
 
         if (action === 'auth') {
           // ── Discord Activity авторизация ──────────────────
@@ -4160,9 +4231,10 @@ initDatabases().then(async () => {
                 for (let yy = params.y; yy < params.y + params.h; yy++) {
                     for (let xx = params.x; xx < params.x + params.w; xx++) {
                         if (xx >= 0 && xx < CANVAS_WIDTH && yy >= 0 && yy < CANVAS_HEIGHT) {
-                            if (params.filled || yy === params.y || yy === params.y + params.h - 1 || xx === params.x || xx === params.x + params.w - 1) {
-                                canvasData[yy * CANVAS_WIDTH + xx] = cidx;
-                                pixelsToUpdate.push({x: xx, y: yy, c: cidx});
+                             if (params.filled || yy === params.y || yy === params.y + params.h - 1 || xx === params.x || xx === params.x + params.w - 1) {
+                                 canvasData[yy * CANVAS_WIDTH + xx] = cidx;
+                                clearPixelOwner(xx, yy);
+                                 pixelsToUpdate.push({x: xx, y: yy, c: cidx});
                             }
                         }
                     }
@@ -4172,9 +4244,10 @@ initDatabases().then(async () => {
                     for (let xx = params.cx - params.r; xx <= params.cx + params.r; xx++) {
                         if (xx >= 0 && xx < CANVAS_WIDTH && yy >= 0 && yy < CANVAS_HEIGHT) {
                             let dist = Math.hypot(xx - params.cx, yy - params.cy);
-                            if (params.filled ? dist <= params.r : Math.abs(dist - params.r) < 1) {
-                                canvasData[yy * CANVAS_WIDTH + xx] = cidx;
-                                pixelsToUpdate.push({x: xx, y: yy, c: cidx});
+                             if (params.filled ? dist <= params.r : Math.abs(dist - params.r) < 1) {
+                                 canvasData[yy * CANVAS_WIDTH + xx] = cidx;
+                                clearPixelOwner(xx, yy);
+                                 pixelsToUpdate.push({x: xx, y: yy, c: cidx});
                             }
                         }
                     }
@@ -4188,6 +4261,7 @@ initDatabases().then(async () => {
                 while (true) {
                     if (x0 >= 0 && x0 < CANVAS_WIDTH && y0 >= 0 && y0 < CANVAS_HEIGHT) {
                         canvasData[y0 * CANVAS_WIDTH + x0] = cidx;
+                        clearPixelOwner(x0, y0);
                         pixelsToUpdate.push({x: x0, y: y0, c: cidx});
                     }
                     if (x0 === x1 && y0 === y1) break;
@@ -4214,8 +4288,9 @@ initDatabases().then(async () => {
               for (let px = 0; px < w; px++) {
                 const cx = sx+px, cy = sy+py;
                 if (cx>=0&&cx<CANVAS_WIDTH&&cy>=0&&cy<CANVAS_HEIGHT) {
-                  temp.push({ x:px, y:py, c:canvasData[cy*CANVAS_WIDTH+cx] });
+                  temp.push({ x:px, y:py, c:canvasData[cy*CANVAS_WIDTH+cx], ownerId:getPixelOwnerId(cx, cy) });
                   canvasData[cy*CANVAS_WIDTH+cx] = 0;
+                  clearPixelOwner(cx, cy);
                   pixelsToUpdate.push({ x:cx, y:cy, c:0 });
                 }
               }
@@ -4226,6 +4301,7 @@ initDatabases().then(async () => {
               const nx = dx+p.x, ny = dy+p.y;
               if (nx>=0&&nx<CANVAS_WIDTH&&ny>=0&&ny<CANVAS_HEIGHT) {
                 canvasData[ny*CANVAS_WIDTH+nx] = p.c;
+                setPixelOwnerId(nx, ny, p.c === 0 ? 0 : p.ownerId);
                 pixelsToUpdate.push({ x:nx, y:ny, c:p.c });
               }
             }
@@ -4249,7 +4325,8 @@ initDatabases().then(async () => {
                  pixels.push({x, y, c:cc});
                }
              }
-             isDirty = true;
+             if (pixelOwners) pixelOwners.fill(0);
+             isDirty = true; ownersDirty = true;
              sendPixelBulk(pixels);
              recordPixelsForTimelapse(pixels);
              ws.send(JSON.stringify({ action:'toast', message:'Радужный шторм запущен!' }));
@@ -4259,7 +4336,7 @@ initDatabases().then(async () => {
             const { pixels } = data.params;
             if (Array.isArray(pixels) && pixels.length > 0) {
               const valid = pixels.filter(p => p.x>=0&&p.x<CANVAS_WIDTH&&p.y>=0&&p.y<CANVAS_HEIGHT&&p.c>=0&&p.c<32);
-              valid.forEach(p => { canvasData[p.y*CANVAS_WIDTH+p.x] = p.c; });
+              valid.forEach(p => { canvasData[p.y*CANVAS_WIDTH+p.x] = p.c; clearPixelOwner(p.x, p.y); });
               isDirty = true;
               await persistCanvas();
               sendPixelBulk(valid);
