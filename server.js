@@ -40,6 +40,7 @@ let CANVAS_HEIGHT = 256;
 let CANVAS_SIZE   = CANVAS_WIDTH * CANVAS_HEIGHT;
 let canvasData    = null;
 let isDirty       = false;
+let canvasPersistPromise = null;
 
 // ── PIXEL OWNERSHIP ────────────────────────────────────────
 // pixelOwners: Uint16Array[CANVAS_SIZE] — у каждого пикселя ID автора (0 = никто)
@@ -1486,38 +1487,49 @@ async function initDatabases() {
 
 // ── PERSIST ────────────────────────────────────────────────
 async function persistCanvas() {
-  if (!isDirty) return;
-  isDirty = false;
-  const b64  = Buffer.from(canvasData).toString('base64');
-  const meta = JSON.stringify({ w: CANVAS_WIDTH, h: CANVAS_HEIGHT });
-  if (redis) {
-    try { await redis.set('canvas_meta', meta); await redis.set('pixel_canvas', b64); } catch(e) { console.error('❌ Redis save:', e.message); }
-  }
-  try { fs.writeFileSync(META_FILE, meta); fs.writeFileSync(CANVAS_FILE, canvasData); } catch(e) {}
+  // Не даём нескольким async-сохранениям записать старый снимок поверх нового.
+  // Все изменения, пришедшие во время записи, сохраняются следующим проходом.
+  if (canvasPersistPromise) return canvasPersistPromise;
+  canvasPersistPromise = (async () => {
+    do {
+      const saveCanvas = isDirty;
+      const saveOwners = ownersDirty;
+      if (!saveCanvas && !saveOwners) break;
+      isDirty = false;
+      ownersDirty = false;
 
-  // Сохраняем таблицу авторов пикселей (только при изменениях)
-  if (ownersDirty) {
-    ownersDirty = false;
-    // Uint16Array → Buffer little-endian
-    const ownerBuf = Buffer.from(pixelOwners.buffer, pixelOwners.byteOffset, pixelOwners.byteLength);
-    const idsArr = [];
-    for (const [username, id] of ownerIdMap.entries()) {
-      const data = ownerDataMap.get(id);
-      idsArr.push({ id, username, emoji: data?.emoji || '👾', avatar: data?.avatar || null });
-    }
-    const idsJson = JSON.stringify(idsArr);
+      if (saveCanvas) {
+        // Копия обязательна: живой Uint8Array может измениться, пока Redis ждёт ответа.
+        const canvasSnapshot = Buffer.from(canvasData);
+        const b64  = canvasSnapshot.toString('base64');
+        const meta = JSON.stringify({ w: CANVAS_WIDTH, h: CANVAS_HEIGHT });
+        if (redis) {
+          try { await redis.set('canvas_meta', meta); await redis.set('pixel_canvas', b64); } catch(e) { console.error('❌ Redis save:', e.message); }
+        }
+        try { fs.writeFileSync(META_FILE, meta); fs.writeFileSync(CANVAS_FILE, canvasSnapshot); } catch(e) {}
+      }
 
-    // Redis — переживает рестарт/редеплой сервера (в отличие от локального диска)
-    if (redis) {
-      try {
-        await redis.set('pixel_owners', ownerBuf.toString('base64'));
-        await redis.set('pixel_owner_ids', idsJson);
-      } catch(e) { console.error('❌ Redis pixel owners save:', e.message); }
-    }
-    // Локальный файл — дублирующий кэш на случай недоступности Redis
-    try { fs.writeFileSync(PIXEL_OWNERS_FILE, ownerBuf); } catch(e) { console.error('❌ pixel_owners.bin save:', e.message); }
-    try { fs.writeFileSync(PIXEL_IDS_FILE, idsJson); } catch(e) { console.error('❌ pixel_owner_ids.json save:', e.message); }
-  }
+      if (saveOwners) {
+        // Копируем и авторов, иначе новый штамп мог бы попасть в старый снимок.
+        const ownerBuf = Buffer.from(pixelOwners.buffer.slice(pixelOwners.byteOffset, pixelOwners.byteOffset + pixelOwners.byteLength));
+        const idsArr = [];
+        for (const [username, id] of ownerIdMap.entries()) {
+          const data = ownerDataMap.get(id);
+          idsArr.push({ id, username, emoji: data?.emoji || '👾', avatar: data?.avatar || null });
+        }
+        const idsJson = JSON.stringify(idsArr);
+        if (redis) {
+          try {
+            await redis.set('pixel_owners', ownerBuf.toString('base64'));
+            await redis.set('pixel_owner_ids', idsJson);
+          } catch(e) { console.error('❌ Redis pixel owners save:', e.message); }
+        }
+        try { fs.writeFileSync(PIXEL_OWNERS_FILE, ownerBuf); } catch(e) { console.error('❌ pixel_owners.bin save:', e.message); }
+        try { fs.writeFileSync(PIXEL_IDS_FILE, idsJson); } catch(e) { console.error('❌ pixel_owner_ids.json save:', e.message); }
+      }
+    } while (isDirty || ownersDirty);
+  })().finally(() => { canvasPersistPromise = null; });
+  return canvasPersistPromise;
 }
 
 async function saveSettings() {
@@ -2119,6 +2131,10 @@ initDatabases().then(async () => {
       }
 
       isDirty = true;
+      // Бомбочка меняет сразу несколько клеток: сначала фиксируем единый
+      // снимок, затем показываем результат. После обновления страницы не
+      // останется набора пикселей, который был виден только в памяти сервера.
+      if (itemId === 'bomb_3x3' || itemId === 'rainbow_5x5') await persistCanvas();
       sendPixelBulk(pixels);
       recordPixelsForTimelapse(pixels);
     }
