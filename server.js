@@ -3482,9 +3482,13 @@ initDatabases().then(async () => {
           const cmd = data.cmd;
 
           if (cmd === 'get_users') {
-            const page = data.page || 1, limit = 10;
+            const requestedPage = Number(data.page) || 1, limit = 10;
+            const query = typeof data.query === 'string' ? data.query.trim().toLocaleLowerCase('ru-RU') : '';
             const allAccs = await dbGetAllAccounts();
-            const users   = allAccs.map(a => ({
+            const matchingAccs = query
+              ? allAccs.filter(a => String(a.username || '').toLocaleLowerCase('ru-RU').includes(query))
+              : allAccs;
+            const users   = matchingAccs.map(a => ({
               username:      a.username,
               role:          a.role  || 'user',
               banned:        a.banned || false,
@@ -3498,8 +3502,9 @@ initDatabases().then(async () => {
               banner:        a.banner_id || null,
             }));
             const totalPages = Math.ceil(users.length / limit) || 1;
+            const page = Math.min(Math.max(1, requestedPage), totalPages);
             const start      = (page - 1) * limit;
-            ws.send(JSON.stringify({ action:'admin_users_list', page, total_pages:totalPages, users:users.slice(start, start+limit), total:users.length }));
+            ws.send(JSON.stringify({ action:'admin_users_list', page, total_pages:totalPages, users:users.slice(start, start+limit), total:users.length, query }));
           }
 
           else if (cmd === 'ban' || cmd === 'unban') {
