@@ -2150,16 +2150,29 @@ initDatabases().then(async () => {
 
     ws.on('message', async (message) => {
       // ── BINARY: установка пикселя (5 байт) ──────────────
-      if (message.length === 5) {
-        if (!ws.isAuthorized) return;
+      if (message.length === 5 || message.length === 9) {
+        // 9-байтовый пакет содержит ID запроса: клиент может сразу показать
+        // пиксель, а затем точно откатить только его при отказе сервера.
+        // Старый 5-байтовый формат оставлен для уже открытых клиентов.
+        const requestId = message.length === 9 ? message.readUInt32BE(5) : null;
+        const x = (message[0] << 8) | message[1];
+        const y = (message[2] << 8) | message[3];
+        const colorIdx = message[4];
+        const rejectPixel = (reason) => {
+          if (requestId === null) return;
+          const color = x >= 0 && x < CANVAS_WIDTH && y >= 0 && y < CANVAS_HEIGHT
+            ? canvasData[y * CANVAS_WIDTH + x] : 0;
+          ws.send(JSON.stringify({ action:'pixel_result', id:requestId, ok:false, x, y, color, reason }));
+        };
+        if (!ws.isAuthorized) { rejectPixel('Нет авторизации'); return; }
         const acc = ws.userData;
-        if (acc.banned) { ws.send(JSON.stringify({ action:'toast', message:'Ваш аккаунт забанен!' })); return; }
+        if (acc.banned) { rejectPixel('Аккаунт заблокирован'); ws.send(JSON.stringify({ action:'toast', message:'Ваш аккаунт забанен!' })); return; }
         if (acc.timeout_until > Date.now()) {
           const left = Math.ceil((acc.timeout_until - Date.now()) / 1000);
-          ws.send(JSON.stringify({ action:'toast', message:`Таймаут! Осталось: ${left}с` })); return;
+          rejectPixel('Таймаут'); ws.send(JSON.stringify({ action:'toast', message:`Таймаут! Осталось: ${left}с` })); return;
         }
         if (isLockedNow() && acc.role !== 'admin') {
-          ws.send(JSON.stringify({ action:'toast', message:'🔒 Пиксель Батл временно закрыт' })); return;
+          rejectPixel('Пиксель Батл временно закрыт'); ws.send(JSON.stringify({ action:'toast', message:'🔒 Пиксель Батл временно закрыт' })); return;
         }
 
         // Кулдаун проверяется и на сервере. Раньше ускоритель менял лишь
@@ -2171,11 +2184,7 @@ initDatabases().then(async () => {
         const effectiveCooldownMs = boostIsActive
           ? Math.max(0, Math.round(serverSettings.cooldownMs * (1 - Math.min(100, acc.cooldownBoostPct) / 100)))
           : serverSettings.cooldownMs;
-        if (acc._lastPixelAt && now - acc._lastPixelAt < effectiveCooldownMs) return;
-
-        const x       = (message[0] << 8) | message[1];
-        const y       = (message[2] << 8) | message[3];
-        const colorIdx = message[4];
+        if (acc._lastPixelAt && now - acc._lastPixelAt < effectiveCooldownMs) { rejectPixel('cooldown'); return; }
 
         if (x >= 0 && x < CANVAS_WIDTH && y >= 0 && y < CANVAS_HEIGHT && colorIdx >= 0 && colorIdx < PALETTE_COLOR_COUNT) {
           canvasData[y * CANVAS_WIDTH + x] = colorIdx;
@@ -2224,6 +2233,9 @@ initDatabases().then(async () => {
           // разблокировалось. Не await'им, чтобы не тормозить приём пикселей.
           ws.sessionPixels += 1;
           checkAchievements(acc.username, acc, { sessionPixels: ws.sessionPixels }).catch(() => {});
+          if (requestId !== null) ws.send(JSON.stringify({ action:'pixel_result', id:requestId, ok:true, x, y, color:colorIdx }));
+        } else {
+          rejectPixel('Некорректная клетка');
         }
         return;
       }
