@@ -387,6 +387,29 @@ const COINS_PER_PIXEL = 0.1;   // 1 монета за 10 пикселей
 // Количество цветов клиента. Значения передаются в одном байте, поэтому
 // расширение палитры не меняет формат пиксельных пакетов.
 const PALETTE_COLOR_COUNT = 34;
+const LEGACY_PALETTE_COLOR_COUNT = 32;
+
+// Старые клиенты знают только первые 32 цвета. При получении индексов 32/33
+// они используют белый fallback, из-за чего на готовых артах появлялись
+// «дырки». Сохраняем новые оттенки на сервере, но отдаём старым клиентам
+// ближайшие известные варианты до тех пор, пока они не обновят Activity.
+function colorForClientPalette(client, colorIndex) {
+  if ((client?.paletteSize || LEGACY_PALETTE_COLOR_COUNT) >= PALETTE_COLOR_COUNT) return colorIndex;
+  if (colorIndex === 32) return 3; // тёмно-серый → чёрный
+  if (colorIndex === 33) return 1; // серо-светлый → светло-серый
+  return colorIndex;
+}
+
+function buildPixelPacketForClient(client, pixels) {
+  const buf = new Uint8Array(pixels.length * 5);
+  for (let i = 0; i < pixels.length; i++) {
+    const p = pixels[i];
+    buf[i*5] = (p.x >> 8) & 0xFF; buf[i*5+1] = p.x & 0xFF;
+    buf[i*5+2] = (p.y >> 8) & 0xFF; buf[i*5+3] = p.y & 0xFF;
+    buf[i*5+4] = colorForClientPalette(client, p.c);
+  }
+  return buf;
+}
 
 // ── ЗВАНИЯ (Этап 4: переход на опыт) ──
 // min теперь измеряется в очках ОПЫТА (xp), а не в пикселях. 1 поставленный
@@ -1928,31 +1951,21 @@ initDatabases().then(async () => {
   function sendCanvasSnapshot(client) {
     if (!client || client.readyState !== 1) return;
     client.send(JSON.stringify({ action: 'canvas_snapshot', w: CANVAS_WIDTH, h: CANVAS_HEIGHT }));
-    client.send(canvasData);
+    const snapshot = Buffer.from(canvasData);
+    if ((client.paletteSize || LEGACY_PALETTE_COLOR_COUNT) < PALETTE_COLOR_COUNT) {
+      for (let i = 0; i < snapshot.length; i++) snapshot[i] = colorForClientPalette(client, snapshot[i]);
+    }
+    client.send(snapshot);
   }
 
   setInterval(() => {
     if (!pixelBatchBuffer.length) return;
     const batch  = pixelBatchBuffer.splice(0);
-    const buf    = new Uint8Array(batch.length * 5);
-    for (let i = 0; i < batch.length; i++) {
-      const p = batch[i];
-      buf[i*5]   = (p.x >> 8) & 0xFF; buf[i*5+1] = p.x & 0xFF;
-      buf[i*5+2] = (p.y >> 8) & 0xFF; buf[i*5+3] = p.y & 0xFF;
-      buf[i*5+4] = p.c;
-    }
-    wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized) c.send(buf); });
+    wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized) c.send(buildPixelPacketForClient(c, batch)); });
   }, 50);
 
   function sendPixelBulk(pixels) {
-    const buf = new Uint8Array(pixels.length * 5);
-    for (let i = 0; i < pixels.length; i++) {
-      const p = pixels[i];
-      buf[i*5]   = (p.x >> 8) & 0xFF; buf[i*5+1] = p.x & 0xFF;
-      buf[i*5+2] = (p.y >> 8) & 0xFF; buf[i*5+3] = p.y & 0xFF;
-      buf[i*5+4] = p.c;
-    }
-    wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized) c.send(buf); });
+    wss.clients.forEach(c => { if (c.readyState === 1 && c.isAuthorized) c.send(buildPixelPacketForClient(c, pixels)); });
   }
 
   // Записывает пачку изменений холста в активную тайм-лапс сессию.
@@ -2224,6 +2237,7 @@ initDatabases().then(async () => {
           // ── Discord Activity авторизация ──────────────────
           if (data.discord_token) {
             try {
+              ws.paletteSize = Math.max(1, Math.min(PALETTE_COLOR_COUNT, Number(data.palette_size) || LEGACY_PALETTE_COLOR_COUNT));
               const discordRes = await fetch('https://discord.com/api/users/@me', {
                 headers: { Authorization: `Bearer ${data.discord_token}` }
               });
