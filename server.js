@@ -244,66 +244,77 @@ function setPixelOwner(x, y, username, emoji, avatar) {
 }
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-async function sendDiscordCampaign(content) {
+const DISCORD_CAMPAIGN_COOLDOWN_MS = 10 * 60 * 1000;
+const DISCORD_DUPLICATE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+let discordCampaignRunning = false;
+let discordCampaignLastStartedAt = 0;
+let discordCampaignLastContentHash = '';
+let discordCampaignLastContentAt = 0;
+let discordApiPauseUntil = 0;
+
+function buildDiscordCampaignPayload(content) {
+  return { flags:32768, components:[{ type:17, accent_color:0x6366F1, components:[
+    { type:10, content },
+    { type:14, divider:true, spacing:1 },
+    { type:1, components:[{ type:2, style:1, label:'Присоединиться к Пиксель Батлу', custom_id:'pixel_battle_launch_activity' }] },
+  ] }] };
+}
+
+async function discordApiRequest(url, options, maxRetries = 3) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const pause = discordApiPauseUntil - Date.now();
+    if (pause > 0) await wait(pause);
+    let response;
+    try { response = await fetch(url, options); }
+    catch (error) {
+      if (attempt === maxRetries) throw error;
+      await wait(750 * (attempt + 1));
+      continue;
+    }
+    if (response.status === 429) {
+      let body = {}; try { body = await response.json(); } catch (_) {}
+      const retryMs = Math.max(250, Math.ceil(Number(body.retry_after || response.headers.get('retry-after') || 1) * 1000) + 120);
+      discordApiPauseUntil = Math.max(discordApiPauseUntil, Date.now() + retryMs);
+      if (attempt === maxRetries) throw new Error('Discord временно ограничил частоту отправки');
+      await wait(retryMs);
+      continue;
+    }
+    const remaining = Number(response.headers.get('x-ratelimit-remaining'));
+    const resetAfter = Number(response.headers.get('x-ratelimit-reset-after'));
+    if (remaining === 0 && Number.isFinite(resetAfter) && resetAfter > 0) {
+      discordApiPauseUntil = Math.max(discordApiPauseUntil, Date.now() + Math.ceil(resetAfter * 1000) + 80);
+    }
+    if (response.status >= 500 && attempt < maxRetries) { await wait(750 * (attempt + 1)); continue; }
+    return response;
+  }
+}
+
+async function sendDiscordMessageToUser(recipientId, content) {
   if (!DISCORD_BOT_TOKEN) throw new Error('Не задана переменная DISCORD_BOT_TOKEN');
+  const headers = { Authorization:`Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type':'application/json' };
+  const channelResponse = await discordApiRequest('https://discord.com/api/v10/users/@me/channels', { method:'POST', headers, body:JSON.stringify({ recipient_id:recipientId }) });
+  if (channelResponse.status === 401) throw new Error('Discord отклонил токен бота');
+  if (!channelResponse.ok) return false;
+  const channel = await channelResponse.json();
+  const messageResponse = await discordApiRequest(`https://discord.com/api/v10/channels/${channel.id}/messages`, { method:'POST', headers, body:JSON.stringify(buildDiscordCampaignPayload(content)) });
+  if (messageResponse.status === 401) throw new Error('Discord отклонил токен бота');
+  return messageResponse.ok;
+}
+
+async function sendDiscordCampaign(content) {
   const accountsList = await dbGetAllAccounts();
   const recipientIds = [...new Set(accountsList.map(acc => String(acc.discord_id || '').trim()).filter(Boolean))];
-  const result = { total: recipientIds.length, sent: 0, failed: 0 };
-  const messagePayload = {
-    flags: 32768,
-    components: [{
-      type: 17,
-      accent_color: 0x6366F1,
-      components: [
-        { type: 10, content },
-        { type: 14, divider: true, spacing: 1 },
-        { type: 1, components: [{ type: 2, style: 1, label: 'Присоединиться к Пиксель Батлу', custom_id: 'pixel_battle_launch_activity' }] },
-      ],
-    }],
-  };
+  const result = { total:recipientIds.length, sent:0, failed:0 };
   for (const recipientId of recipientIds) {
-    try {
-      const channelResponse = await fetch('https://discord.com/api/v10/users/@me/channels', {
-        method: 'POST',
-        headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ recipient_id: recipientId }),
-      });
-      if (!channelResponse.ok) { result.failed++; continue; }
-      const channel = await channelResponse.json();
-      const messageResponse = await fetch(`https://discord.com/api/v10/channels/${channel.id}/messages`, {
-        method: 'POST',
-        headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(messagePayload),
-      });
-      if (messageResponse.ok) result.sent++;
-      else result.failed++;
-    } catch (_) { result.failed++; }
+    try { if (await sendDiscordMessageToUser(recipientId, content)) result.sent++; else result.failed++; }
+    catch (error) { if (/токен бота/.test(error.message)) throw error; result.failed++; }
     await wait(550);
   }
   return result;
 }
 
 async function sendDiscordCampaignTest(content) {
-  if (!DISCORD_BOT_TOKEN) throw new Error('Не задана переменная DISCORD_BOT_TOKEN');
-  const messagePayload = {
-    flags: 32768,
-    components: [{ type: 17, accent_color: 0x6366F1, components: [
-      { type: 10, content },
-      { type: 14, divider: true, spacing: 1 },
-      { type: 1, components: [{ type: 2, style: 1, label: 'Присоединиться к Пиксель Батлу', custom_id: 'pixel_battle_launch_activity' }] },
-    ] }],
-  };
-  const channelResponse = await fetch('https://discord.com/api/v10/users/@me/channels', {
-    method: 'POST', headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ recipient_id: DISCORD_TEST_USER_ID }),
-  });
-  if (!channelResponse.ok) throw new Error(`Discord не открыл ЛС (${channelResponse.status})`);
-  const channel = await channelResponse.json();
-  const messageResponse = await fetch(`https://discord.com/api/v10/channels/${channel.id}/messages`, {
-    method: 'POST', headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(messagePayload),
-  });
-  if (!messageResponse.ok) throw new Error(`Discord не отправил сообщение (${messageResponse.status})`);
+  if (!await sendDiscordMessageToUser(DISCORD_TEST_USER_ID, content)) throw new Error('Discord не смог доставить тестовое сообщение');
 }
 
 function getPixelOwner(x, y) {
@@ -4165,17 +4176,30 @@ initDatabases().then(async () => {
             const msg = String(data.params || '').trim();
             if (!msg) { ws.send(JSON.stringify({ action:'toast', message:'Введите текст рассылки' })); return; }
             if (msg.length > 2000) { ws.send(JSON.stringify({ action:'toast', message:'Сообщение не должно быть длиннее 2000 символов' })); return; }
+            if (!DISCORD_BOT_TOKEN) { ws.send(JSON.stringify({ action:'toast', message:'Не задан DISCORD_BOT_TOKEN' })); return; }
+            if (discordCampaignRunning) { ws.send(JSON.stringify({ action:'toast', message:'Рассылка уже выполняется' })); return; }
+            const now = Date.now();
+            const contentHash = crypto.createHash('sha256').update(msg).digest('hex');
+            if (now - discordCampaignLastStartedAt < DISCORD_CAMPAIGN_COOLDOWN_MS) { ws.send(JSON.stringify({ action:'toast', message:'Подождите 10 минут перед следующей массовой рассылкой' })); return; }
+            if (contentHash === discordCampaignLastContentHash && now - discordCampaignLastContentAt < DISCORD_DUPLICATE_COOLDOWN_MS) { ws.send(JSON.stringify({ action:'toast', message:'Такое же сообщение уже отправлялось за последние 24 часа' })); return; }
+            discordCampaignRunning = true;
+            discordCampaignLastStartedAt = now;
             try {
               const result = await sendDiscordCampaign(msg);
+              discordCampaignLastContentHash = contentHash;
+              discordCampaignLastContentAt = Date.now();
               ws.send(JSON.stringify({ action:'discord_campaign_result', ...result }));
             } catch (error) {
               ws.send(JSON.stringify({ action:'toast', message:`Ошибка Discord-рассылки: ${error.message}` }));
+            } finally {
+              discordCampaignRunning = false;
             }
           }
 
           else if (cmd === 'discord_campaign_test') {
             const msg = String(data.params || '').trim() || 'Тестовое сообщение Pixel Battle';
             if (msg.length > 2000) { ws.send(JSON.stringify({ action:'toast', message:'Сообщение не должно быть длиннее 2000 символов' })); return; }
+            if (!DISCORD_BOT_TOKEN) { ws.send(JSON.stringify({ action:'toast', message:'Не задан DISCORD_BOT_TOKEN' })); return; }
             try {
               await sendDiscordCampaignTest(msg);
               ws.send(JSON.stringify({ action:'discord_campaign_result', test:true, sent:1, failed:0 }));
