@@ -10,6 +10,7 @@ const express    = require('express');
 const { WebSocketServer } = require('ws');
 const fs         = require('fs');
 const path       = require('path');
+const crypto     = require('crypto');
 
 // ── OPTIONAL DEPS ──────────────────────────────────────────
 let Redis = null, mongoose = null, cloudinary = null;
@@ -26,7 +27,7 @@ try { tl = require('./timelapse_server'); } catch(e) {
 const PORT           = process.env.PORT || 3000;
 const ADMIN_USERNAME = 'Yamiko';
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
-const DISCORD_ACTIVITY_URL = process.env.DISCORD_ACTIVITY_URL || 'https://decord228.github.io/YamikoPixelBattle';
+const DISCORD_PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY || '';
 const DISCORD_TEST_USER_ID = '409071932244492308';
 const CANVAS_FILE       = path.join(__dirname, 'canvas.bin');
 const META_FILE         = path.join(__dirname, 'canvas_meta.json');
@@ -256,7 +257,7 @@ async function sendDiscordCampaign(content) {
       components: [
         { type: 10, content },
         { type: 14, divider: true, spacing: 1 },
-        { type: 1, components: [{ type: 2, style: 5, label: 'Присоединиться к Пиксель Батлу', url: DISCORD_ACTIVITY_URL }] },
+        { type: 1, components: [{ type: 2, style: 1, label: 'Присоединиться к Пиксель Батлу', custom_id: 'pixel_battle_launch_activity' }] },
       ],
     }],
   };
@@ -289,7 +290,7 @@ async function sendDiscordCampaignTest(content) {
     components: [{ type: 17, accent_color: 0x6366F1, components: [
       { type: 10, content },
       { type: 14, divider: true, spacing: 1 },
-      { type: 1, components: [{ type: 2, style: 5, label: 'Присоединиться к Пиксель Батлу', url: DISCORD_ACTIVITY_URL }] },
+      { type: 1, components: [{ type: 2, style: 1, label: 'Присоединиться к Пиксель Батлу', custom_id: 'pixel_battle_launch_activity' }] },
     ] }],
   };
   const channelResponse = await fetch('https://discord.com/api/v10/users/@me/channels', {
@@ -1529,6 +1530,28 @@ initDatabases().then(async () => {
   }
 
   const app = express();
+  // Discord вызывает этот endpoint при нажатии на кнопку в личной рассылке.
+  // Подпись проверяется до обработки: иначе любой мог бы подделать запуск Activity.
+  app.post('/interactions', express.raw({ type: 'application/json' }), (req, res) => {
+    try {
+      if (!DISCORD_PUBLIC_KEY || !/^[0-9a-f]{64}$/i.test(DISCORD_PUBLIC_KEY)) return res.status(503).send('Discord interactions are not configured');
+      const signature = req.get('X-Signature-Ed25519') || '';
+      const timestamp = req.get('X-Signature-Timestamp') || '';
+      const publicKey = crypto.createPublicKey({
+        key: Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), Buffer.from(DISCORD_PUBLIC_KEY, 'hex')]),
+        format: 'der', type: 'spki',
+      });
+      const valid = crypto.verify(null, Buffer.concat([Buffer.from(timestamp), req.body]), publicKey, Buffer.from(signature, 'hex'));
+      if (!valid) return res.status(401).send('Invalid request signature');
+      const interaction = JSON.parse(req.body.toString('utf8'));
+      if (interaction.type === 1) return res.json({ type: 1 });
+      if (interaction.type === 3 && interaction.data?.custom_id === 'pixel_battle_launch_activity') return res.json({ type: 12 });
+      return res.status(400).send('Unsupported interaction');
+    } catch (error) {
+      console.error('[Discord interactions]', error.message);
+      return res.status(401).send('Invalid interaction');
+    }
+  });
   app.use(express.json({ limit: '20mb' }));
 
   // CORS: фронтенд может быть открыт с другого домена (например GitHub Pages),
