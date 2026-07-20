@@ -28,6 +28,8 @@ const PORT           = process.env.PORT || 3000;
 const ADMIN_USERNAME = 'Yamiko';
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const DISCORD_PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY || '';
+// Секрет Turnstile хранится только в окружении хостинга, никогда не в клиенте.
+const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
 const DISCORD_TEST_USER_ID = '409071932244492308';
 const CANVAS_FILE       = path.join(__dirname, 'canvas.bin');
 const META_FILE         = path.join(__dirname, 'canvas_meta.json');
@@ -416,18 +418,25 @@ const ANTIBOT_BEHAVIOR_WINDOW_MS = 15 * 60 * 1000;
 const ANTIBOT_BEHAVIOR_SAMPLE_SIZE = 16;
 const ANTIBOT_BEHAVIOR_INTERVAL_CV_MAX = 0.02;
 const ANTIBOT_SLOW_MODE_MS = 5 * 60 * 1000;
+const ANTIBOT_TURNSTILE_CHALLENGE_MS = 5 * 60 * 1000;
+const ANTIBOT_TURNSTILE_CLEARANCE_MS = 30 * 60 * 1000;
 // Ключ — имя подтверждённого Discord-аккаунта. Карта переживает переподключение,
 // но не нужна после истечения короткого окна подозрений.
 const antiBotSuspicionByUsername = new Map();
 const antiBotBehaviorByUsername = new Map();
 
-function recordAntiBotBehavior(ws, acc, now, x, y) {
-  let state = antiBotBehaviorByUsername.get(acc.username);
+function getAntiBotBehaviorState(username, now) {
+  let state = antiBotBehaviorByUsername.get(username);
   if (!state || now - state.updatedAt > ANTIBOT_BEHAVIOR_WINDOW_MS) {
-    state = { events: [], updatedAt: now, lastInterventionAt: 0, slowUntil: 0 };
-    antiBotBehaviorByUsername.set(acc.username, state);
+    state = { events: [], updatedAt: now, lastInterventionAt: 0, slowUntil: 0, turnstileRequiredUntil: 0, turnstileVerifiedUntil: 0 };
+    antiBotBehaviorByUsername.set(username, state);
   }
   state.updatedAt = now;
+  return state;
+}
+
+function recordAntiBotBehavior(ws, acc, now, x, y) {
+  const state = getAntiBotBehaviorState(acc.username, now);
   state.events.push({
     at: now,
     x,
@@ -438,8 +447,12 @@ function recordAntiBotBehavior(ws, acc, now, x, y) {
   if (state.events.length > 100) state.events.shift();
   ws.cursorMovesSincePixel = 0;
 
-  const recent = state.events.slice(-ANTIBOT_BEHAVIOR_SAMPLE_SIZE);
-  if (recent.length < ANTIBOT_BEHAVIOR_SAMPLE_SIZE) return null;
+  // Турбо-режим даёт одну попытку в секунду и особенно выгоден боту. Для
+  // него достаточно короткой серии, но наказание остаётся CAPTCHA, не баном.
+  const sampleSize = (acc.cooldownBoostPct || 0) >= 90 && (acc.cooldownBoostUntil || 0) > now
+    ? 6 : ANTIBOT_BEHAVIOR_SAMPLE_SIZE;
+  const recent = state.events.slice(-sampleSize);
+  if (recent.length < sampleSize) return null;
   const intervals = recent.slice(1).map((event, index) => event.at - recent[index].at);
   const meanInterval = intervals.reduce((sum, value) => sum + value, 0) / intervals.length;
   const variance = intervals.reduce((sum, value) => sum + (value - meanInterval) ** 2, 0) / intervals.length;
@@ -450,7 +463,7 @@ function recordAntiBotBehavior(ws, acc, now, x, y) {
   const uniqueSteps = new Set(steps).size;
   const reasons = [];
   if (intervalCv <= ANTIBOT_BEHAVIOR_INTERVAL_CV_MAX && meanInterval >= 1000) reasons.push('ровный интервал');
-  if (directCursorCount >= ANTIBOT_BEHAVIOR_SAMPLE_SIZE - 1) reasons.push('курсор появляется прямо у цели');
+  if (directCursorCount >= sampleSize - 1) reasons.push('курсор появляется прямо у цели');
   if (uniqueSteps <= 2) reasons.push('повторяющийся шаг по сетке');
   // Не реагируем на один признак: люди могут вручную рисовать линию или
   // попадать в ритм кулдауна. Для slow mode нужен именно почти идеальный
@@ -460,8 +473,29 @@ function recordAntiBotBehavior(ws, acc, now, x, y) {
 
   state.lastInterventionAt = now;
   state.slowUntil = Math.max(state.slowUntil || 0, now + ANTIBOT_SLOW_MODE_MS);
+  if (TURNSTILE_SECRET_KEY) state.turnstileRequiredUntil = now + ANTIBOT_TURNSTILE_CHALLENGE_MS;
   ws.antiBotSlowUntil = state.slowUntil;
-  return { reasons, until: state.slowUntil, intervalCv, meanInterval };
+  return { reasons, until: state.slowUntil, intervalCv, meanInterval, turnstileRequired: !!TURNSTILE_SECRET_KEY };
+}
+
+async function validateTurnstileToken(token, remoteIp) {
+  if (!TURNSTILE_SECRET_KEY || typeof token !== 'string' || token.length < 20 || token.length > 2048) return false;
+  try {
+    const body = new URLSearchParams({
+      secret: TURNSTILE_SECRET_KEY,
+      response: token,
+      remoteip: remoteIp || '',
+      idempotency_key: crypto.randomUUID(),
+    });
+    const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body,
+    });
+    const result = await response.json();
+    return response.ok && result?.success === true;
+  } catch (error) {
+    console.warn(`[ANTI-BOT] Turnstile validation error: ${error.message}`);
+    return false;
+  }
 }
 // Количество цветов клиента. Значения передаются в одном байте, поэтому
 // расширение палитры не меняет формат пиксельных пакетов.
@@ -2409,11 +2443,22 @@ initDatabases().then(async () => {
           rejectPixel('Пиксель Батл временно закрыт'); ws.send(JSON.stringify({ action:'toast', message:'🔒 Пиксель Батл временно закрыт' })); return;
         }
 
+        const now = Date.now();
+        const turnstileState = antiBotBehaviorByUsername.get(acc.username);
+        if (TURNSTILE_SECRET_KEY && turnstileState?.turnstileRequiredUntil > now
+          && (turnstileState.turnstileVerifiedUntil || 0) <= now) {
+          if (!ws.lastTurnstilePromptAt || now - ws.lastTurnstilePromptAt > 3000) {
+            ws.lastTurnstilePromptAt = now;
+            ws.send(JSON.stringify({ action:'turnstile_required', expires_at:turnstileState.turnstileRequiredUntil }));
+          }
+          rejectPixel('restricted');
+          return;
+        }
+
         // Кулдаун проверяется и на сервере. Раньше ускоритель менял лишь
         // таймер в браузере: после переподключения эффект исчезал, а клиент
         // мог вообще обойти ограничение. Для всех ролей используется базовый
         // кулдаун, уменьшенный активным личным ускорителем.
-        const now = Date.now();
         // Базовая защита от скриптов, которые отправляют бинарные пакеты
         // напрямую. Реальный клиент сообщает координату указателя до клика.
         // Оба формата проходят один и тот же антибот-барьер. Иначе скрипт
@@ -2435,15 +2480,11 @@ initDatabases().then(async () => {
             acc.timeout_until = timeoutUntil;
             await dbSaveAccount(acc.username, { timeout_until: timeoutUntil });
             antiBotSuspicionByUsername.delete(acc.username);
-            rejectPixel('Подозрение на автоматическую установку: таймаут на 5 минут');
-            ws.send(JSON.stringify({
-              action:'toast',
-              message:'За подозрительную автоматическую установку выдан таймаут на 5 минут.'
-            }));
+            rejectPixel('restricted');
             console.warn(`[ANTI-BOT] ${acc.username}: timeout 5m after ${suspicion.count} cursor-proof failures`);
             return;
           }
-          rejectPixel(`Подведите курсор к клетке и повторите попытку (${suspicion.count}/${ANTIBOT_SUSPICION_LIMIT})`);
+          rejectPixel('restricted');
           return;
         }
         const boostIsActive = (acc.cooldownBoostUntil || 0) > now && (acc.cooldownBoostPct || 0) > 0;
@@ -2478,11 +2519,10 @@ initDatabases().then(async () => {
           const antiBotIntervention = recordAntiBotBehavior(ws, acc, now, x, y);
           if (antiBotIntervention) {
             const leftMinutes = Math.ceil((antiBotIntervention.until - now) / 60000);
-            ws.send(JSON.stringify({
-              action:'toast',
-              message:`Защитная проверка: скорость установки временно снижена на ${leftMinutes} мин.`
-            }));
             console.warn(`[ANTI-BOT] ${acc.username}: slow mode ${leftMinutes}m; ${antiBotIntervention.reasons.join(', ')}`);
+            if (antiBotIntervention.turnstileRequired) {
+              ws.send(JSON.stringify({ action:'turnstile_required', expires_at:now + ANTIBOT_TURNSTILE_CHALLENGE_MS }));
+            }
           }
 
           const prevCoins = acc.coins || 0;
@@ -2547,6 +2587,30 @@ initDatabases().then(async () => {
         // Не требует авторизации и не влияет на таймлапс: это только чтение.
         if (action === 'get_canvas_snapshot') {
           sendCanvasSnapshot(ws);
+          return;
+        }
+
+        if (action === 'turnstile_verify') {
+          if (!ws.isAuthorized) return;
+          if (!TURNSTILE_SECRET_KEY) {
+            ws.send(JSON.stringify({ action:'turnstile_result', ok:false, message:'Проверка безопасности временно недоступна' }));
+            return;
+          }
+          const state = antiBotBehaviorByUsername.get(ws.userData.username);
+          if (!state || state.turnstileRequiredUntil <= Date.now()) {
+            ws.send(JSON.stringify({ action:'turnstile_result', ok:false, message:'Проверка больше не требуется или истекла' }));
+            return;
+          }
+          const remoteIp = ws._socket?.remoteAddress || '';
+          const verified = await validateTurnstileToken(data.token, remoteIp);
+          if (!verified) {
+            ws.send(JSON.stringify({ action:'turnstile_result', ok:false, message:'Проверка не пройдена. Попробуйте ещё раз.' }));
+            return;
+          }
+          state.turnstileRequiredUntil = 0;
+          state.turnstileVerifiedUntil = Date.now() + ANTIBOT_TURNSTILE_CLEARANCE_MS;
+          ws.send(JSON.stringify({ action:'turnstile_result', ok:true, until:state.turnstileVerifiedUntil }));
+          console.info(`[ANTI-BOT] ${ws.userData.username}: Turnstile passed`);
           return;
         }
 
