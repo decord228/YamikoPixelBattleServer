@@ -2666,6 +2666,22 @@ initDatabases().then(async () => {
           return;
         }
 
+        // Cloudflare Turnstile cannot render inside Discord Activity's embedded
+        // frame. In that channel we never silently block a player: the original
+        // suspicious-action record remains in the admin review queue, while a
+        // moderator can apply a manual timeout or ban from there.
+        if (action === 'turnstile_unavailable') {
+          if (!ws.isAuthorized || data.source !== 'discord_activity') return;
+          const state = antiBotBehaviorByUsername.get(ws.userData.username);
+          if (state && state.turnstileRequiredUntil > Date.now()) {
+            state.turnstileRequiredUntil = 0;
+            state.turnstileVerifiedUntil = 0;
+            console.info(`[ANTI-BOT] ${ws.userData.username}: Discord Activity cannot render Turnstile; kept for manual review`);
+          }
+          ws.send(JSON.stringify({ action:'turnstile_result', ok:true, bypassed:true }));
+          return;
+        }
+
         if (action === 'auth') {
           // ── Discord Activity авторизация ──────────────────
           if (data.discord_token) {
