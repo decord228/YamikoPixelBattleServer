@@ -416,7 +416,6 @@ const ANTIBOT_BEHAVIOR_WINDOW_MS = 15 * 60 * 1000;
 const ANTIBOT_BEHAVIOR_SAMPLE_SIZE = 16;
 const ANTIBOT_BEHAVIOR_INTERVAL_CV_MAX = 0.02;
 const ANTIBOT_SLOW_MODE_MS = 5 * 60 * 1000;
-const ANTIBOT_SLOW_MODE_MULTIPLIER = 2;
 // Ключ — имя подтверждённого Discord-аккаунта. Карта переживает переподключение,
 // но не нужна после истечения короткого окна подозрений.
 const antiBotSuspicionByUsername = new Map();
@@ -2417,14 +2416,14 @@ initDatabases().then(async () => {
         const now = Date.now();
         // Базовая защита от скриптов, которые отправляют бинарные пакеты
         // напрямую. Реальный клиент сообщает координату указателя до клика.
-        // Проверка намеренно не используется для старого 5-байтового
-        // протокола: уже открытые старые вкладки не умеют получить причину
-        // отказа и не должны внезапно перестать рисовать.
+        // Оба формата проходят один и тот же антибот-барьер. Иначе скрипт
+        // может просто послать старый 5-байтовый пакет и полностью обойти
+        // всю защиту. Обычный актуальный клиент использует 9 байт.
         const hasRecentHumanCursor = ws.lastHumanCursor
           && now - ws.lastHumanCursorAt <= HUMAN_CURSOR_MAX_AGE_MS
           && Math.abs(ws.lastHumanCursor.x - x) <= HUMAN_CURSOR_MAX_DISTANCE
           && Math.abs(ws.lastHumanCursor.y - y) <= HUMAN_CURSOR_MAX_DISTANCE;
-        if (requestId !== null && !hasRecentHumanCursor) {
+        if (!hasRecentHumanCursor) {
           ws.suspiciousPixelAttempts++;
           const previous = antiBotSuspicionByUsername.get(acc.username);
           const suspicion = previous && now - previous.firstAt <= ANTIBOT_SUSPICION_WINDOW_MS
@@ -2455,8 +2454,11 @@ initDatabases().then(async () => {
         const antiBotSlowUntil = Math.max(ws.antiBotSlowUntil || 0, behaviorState?.slowUntil || 0);
         ws.antiBotSlowUntil = antiBotSlowUntil;
         const antiBotSlowMode = antiBotSlowUntil > now;
+        // Для подозрительной серии не просто удлиняем ускоренный КД, а
+        // временно возвращаем базовый серверный. Иначе VIP-буст −90%
+        // превращал бы антибот-замедление всего в 2 секунды.
         const guardedCooldownMs = antiBotSlowMode
-          ? effectiveCooldownMs * ANTIBOT_SLOW_MODE_MULTIPLIER
+          ? serverSettings.cooldownMs
           : effectiveCooldownMs;
         if (acc._lastPixelAt && now - acc._lastPixelAt < guardedCooldownMs) {
           rejectPixel('cooldown', { serverNow: now, nextAllowedAt: acc._lastPixelAt + guardedCooldownMs });
@@ -2527,7 +2529,7 @@ initDatabases().then(async () => {
               ws.antiBotSlowUntil || 0,
               antiBotBehaviorByUsername.get(acc.username)?.slowUntil || 0,
             ) > now
-              ? effectiveCooldownMs * ANTIBOT_SLOW_MODE_MULTIPLIER
+              ? serverSettings.cooldownMs
               : effectiveCooldownMs),
           });
         } else {
