@@ -466,6 +466,14 @@ function recordAntiBotBehavior(ws, acc, now, x, y) {
     return distance >= 12 && event.at - event.cursorAt >= 0
       && event.at - event.cursorAt <= 75 && event.cursorMoves <= 1;
   }).length;
+  // Это намеренно не опирается на cursor-сообщения: бот может нарисовать
+  // себе фальшивую траекторию, но серия реальных пикселей, прыгающих по
+  // холсту на десятки клеток почти каждую секунду, остаётся наблюдаемой.
+  const rapidTargetJumpCount = recent.slice(1).filter((event, index) => {
+    const previous = recent[index];
+    const distance = Math.hypot(event.x - previous.x, event.y - previous.y);
+    return distance >= 12 && event.at - previous.at <= 1600;
+  }).length;
   const steps = recent.slice(1).map((event, index) => `${event.x - recent[index].x},${event.y - recent[index].y}`);
   const uniqueSteps = new Set(steps).size;
   const reasons = [];
@@ -473,10 +481,12 @@ function recordAntiBotBehavior(ws, acc, now, x, y) {
   if (directCursorCount >= sampleSize - 1) reasons.push('курсор появляется прямо у цели');
   if (uniqueSteps <= 2) reasons.push('повторяющийся шаг по сетке');
   if (instantTeleportCount >= 3) reasons.push('мгновенные прыжки курсора');
+  if (rapidTargetJumpCount >= (sampleSize === 6 ? 4 : 7)) reasons.push('быстрые дальние прыжки целей');
   // Не реагируем на один признак: люди могут вручную рисовать линию или
   // попадать в ритм кулдауна. Для slow mode нужен именно почти идеальный
   // ритм вместе с ещё одним независимым признаком.
-  const hasTeleportPattern = reasons.includes('мгновенные прыжки курсора');
+  const hasTeleportPattern = reasons.includes('мгновенные прыжки курсора')
+    || reasons.includes('быстрые дальние прыжки целей');
   if (((!reasons.includes('ровный интервал') || reasons.length < 2) && !hasTeleportPattern)
     || now - state.lastInterventionAt < ANTIBOT_SLOW_MODE_MS) return null;
 
@@ -2914,6 +2924,10 @@ initDatabases().then(async () => {
 
         else if (action === 'cursor') {
           if (!ws.isAuthorized) return;
+          // `isTrusted` нельзя считать абсолютной криптографической защитой,
+          // но обычный console-бот с dispatchEvent(MouseEvent) не может
+          // создать настоящее событие браузера и не должен обновлять proof.
+          if (data.trusted !== true) return;
           const cursorX = Number(data.x), cursorY = Number(data.y);
           if (!Number.isInteger(cursorX) || !Number.isInteger(cursorY)
             || cursorX < 0 || cursorX >= CANVAS_WIDTH || cursorY < 0 || cursorY >= CANVAS_HEIGHT) return;
