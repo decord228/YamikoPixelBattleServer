@@ -404,6 +404,11 @@ if (cloudinary && process.env.CLOUDINARY_CLOUD_NAME) {
 
 // ── COIN REWARDS ───────────────────────────────────────────
 const COINS_PER_PIXEL = 0.1;   // 1 монета за 10 пикселей
+// Антибот: WebSocket-клиент должен недавно сообщить позицию реального
+// указателя рядом с клеткой. Это останавливает простые скрипты, которые
+// вызывают placePixel()/sendPixel() напрямую, не затрагивая таймлапс.
+const HUMAN_CURSOR_MAX_AGE_MS = 15000;
+const HUMAN_CURSOR_MAX_DISTANCE = 2;
 // Количество цветов клиента. Значения передаются в одном байте, поэтому
 // расширение палитры не меняет формат пиксельных пакетов.
 const PALETTE_COLOR_COUNT = 34;
@@ -887,6 +892,7 @@ if (Redis && process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_RES
 // только после полной записи обеих частей, поэтому рестарт не склеит их из
 // разных моментов времени.
 const BOARD_SNAPSHOT_POINTER_KEY = 'pixel_board_snapshot_current_v2';
+const BOARD_SNAPSHOT_HISTORY_KEY = 'pixel_board_snapshot_history_v2';
 let boardSnapshotSequence = 0;
 function boardSnapshotKeys(id) {
   const base = `pixel_board_snapshot_v2:${id}`;
@@ -1410,6 +1416,7 @@ async function initDatabases() {
   // Метаданные холста
   let metaLoaded = false;
   let boardSnapshotRef = null;
+  let boardSnapshotFallbackRefs = [];
   if (redis) {
     try {
       const raw = await redis.get(BOARD_SNAPSHOT_POINTER_KEY);
@@ -1421,6 +1428,15 @@ async function initDatabases() {
         metaLoaded = true;
       }
     } catch(e) { console.error('❌ Redis board snapshot pointer:', e.message); }
+    // История хранит предыдущие целые версии. Она не участвует в обычном
+    // запуске, но даёт безопасный fallback, если активный снимок повреждён.
+    try {
+      const rawHistory = await redis.get(BOARD_SNAPSHOT_HISTORY_KEY);
+      const history = rawHistory ? (typeof rawHistory === 'string' ? JSON.parse(rawHistory) : rawHistory) : [];
+      if (Array.isArray(history)) {
+        boardSnapshotFallbackRefs = history.filter(ref => ref?.id && ref?.w && ref?.h && ref.id !== boardSnapshotRef?.id);
+      }
+    } catch(e) { console.error('❌ Redis board snapshot history:', e.message); }
   }
   if (redis && !metaLoaded) {
     try {
@@ -1447,22 +1463,30 @@ async function initDatabases() {
   let snapshotOwnersBuffer = null;
   let snapshotOwnerIds = null;
   if (redis && boardSnapshotRef) {
-    try {
-      const keys = boardSnapshotKeys(boardSnapshotRef.id);
-      const [canvasB64, ownersB64, idsRaw] = await Promise.all([
-        redis.get(keys.canvas), redis.get(keys.owners), redis.get(keys.ids)
-      ]);
-      const canvasBuf = canvasB64 ? Buffer.from(canvasB64, 'base64') : null;
-      const ownersBuf = ownersB64 ? Buffer.from(ownersB64, 'base64') : null;
-      const ids = idsRaw ? (typeof idsRaw === 'string' ? JSON.parse(idsRaw) : idsRaw) : null;
-      if (canvasBuf?.length === CANVAS_SIZE && ownersBuf?.length === CANVAS_SIZE * 2 && Array.isArray(ids)) {
-        canvasData.set(canvasBuf);
-        snapshotOwnersBuffer = ownersBuf;
-        snapshotOwnerIds = ids;
-        canvasLoaded = true;
-        console.log('✅ Холст и авторы загружены из единого снимка Redis');
-      }
-    } catch(e) { console.error('❌ Redis board snapshot:', e.message); }
+    const candidates = [boardSnapshotRef, ...boardSnapshotFallbackRefs];
+    for (const ref of candidates) {
+      // Текущая версия и резерв должны иметь те же размеры; снимок другого
+      // размера остаётся в истории, но не подменяет работающий холст молча.
+      if (ref.w !== CANVAS_WIDTH || ref.h !== CANVAS_HEIGHT) continue;
+      try {
+        const keys = boardSnapshotKeys(ref.id);
+        const [canvasB64, ownersB64, idsRaw] = await Promise.all([
+          redis.get(keys.canvas), redis.get(keys.owners), redis.get(keys.ids)
+        ]);
+        const canvasBuf = canvasB64 ? Buffer.from(canvasB64, 'base64') : null;
+        const ownersBuf = ownersB64 ? Buffer.from(ownersB64, 'base64') : null;
+        const ids = idsRaw ? (typeof idsRaw === 'string' ? JSON.parse(idsRaw) : idsRaw) : null;
+        if (canvasBuf?.length === CANVAS_SIZE && ownersBuf?.length === CANVAS_SIZE * 2 && Array.isArray(ids)) {
+          canvasData.set(canvasBuf);
+          snapshotOwnersBuffer = ownersBuf;
+          snapshotOwnerIds = ids;
+          canvasLoaded = true;
+          if (ref.id !== boardSnapshotRef.id) console.warn(`⚠️ Активный снимок повреждён, восстановлен резерв ${ref.id}`);
+          else console.log('✅ Холст и авторы загружены из единого снимка Redis');
+          break;
+        }
+      } catch(e) { console.error('❌ Redis board snapshot:', e.message); }
+    }
   }
   if (redis && !canvasLoaded) {
     try {
@@ -1595,9 +1619,27 @@ async function persistCanvas() {
           await redis.set(keys.owners, ownerBuf.toString('base64'));
           await redis.set(keys.ids, idsJson);
           // Только эта операция делает новую версию видимой после рестарта.
-          await redis.set(BOARD_SNAPSHOT_POINTER_KEY, JSON.stringify({ id:snapshotId, w:CANVAS_WIDTH, h:CANVAS_HEIGHT }));
-          if (previous?.id && previous.id !== snapshotId) {
-            const old = boardSnapshotKeys(previous.id);
+          const currentRef = { id:snapshotId, w:CANVAS_WIDTH, h:CANVAS_HEIGHT };
+          await redis.set(BOARD_SNAPSHOT_POINTER_KEY, JSON.stringify(currentRef));
+          // После commit сохраняем один предыдущий целый снимок. Если текущий
+          // ключ окажется повреждённым, старт выберет эту резервную версию.
+          let oldHistory = [];
+          try {
+            const rawHistory = await redis.get(BOARD_SNAPSHOT_HISTORY_KEY);
+            const parsed = rawHistory ? (typeof rawHistory === 'string' ? JSON.parse(rawHistory) : rawHistory) : [];
+            if (Array.isArray(parsed)) oldHistory = parsed;
+          } catch (_) {}
+          const history = [currentRef, previous, ...oldHistory]
+            .filter(ref => ref?.id && ref?.w && ref?.h)
+            .filter((ref, index, all) => all.findIndex(other => other.id === ref.id) === index)
+            .slice(0, 2);
+          await redis.set(BOARD_SNAPSHOT_HISTORY_KEY, JSON.stringify(history));
+          // Чистим только версии, которые больше не являются текущей или
+          // резервной. Ошибка очистки не влияет на целостность данных.
+          const retainedIds = new Set(history.map(ref => ref.id));
+          for (const ref of oldHistory) {
+            if (!ref?.id || retainedIds.has(ref.id)) continue;
+            const old = boardSnapshotKeys(ref.id);
             try { await redis.del(old.canvas, old.owners, old.ids); } catch (_) {}
           }
           boardPersistStatus.lastSuccessAt = Date.now();
@@ -2256,6 +2298,11 @@ initDatabases().then(async () => {
     ws.sessionPixels = 0;
     ws.isAuthorized = false;
     ws.userData     = null;
+    // Сигнал присутствия человека живёт только в памяти сокета и не попадает
+    // ни в снимки холста, ни в поток таймлапса.
+    ws.lastHumanCursor = null;
+    ws.lastHumanCursorAt = 0;
+    ws.suspiciousPixelAttempts = 0;
     // Короткий кэш результатов делает повтор одного requestId идемпотентным:
     // потерянный ответ можно запросить повторно без второго начисления награды.
     ws.pixelRequestResults = new Map();
@@ -2311,6 +2358,20 @@ initDatabases().then(async () => {
         // мог вообще обойти ограничение. Для всех ролей используется базовый
         // кулдаун, уменьшенный активным личным ускорителем.
         const now = Date.now();
+        // Базовая защита от скриптов, которые отправляют бинарные пакеты
+        // напрямую. Реальный клиент сообщает координату указателя до клика.
+        // Проверка намеренно не используется для старого 5-байтового
+        // протокола: уже открытые старые вкладки не умеют получить причину
+        // отказа и не должны внезапно перестать рисовать.
+        const hasRecentHumanCursor = ws.lastHumanCursor
+          && now - ws.lastHumanCursorAt <= HUMAN_CURSOR_MAX_AGE_MS
+          && Math.abs(ws.lastHumanCursor.x - x) <= HUMAN_CURSOR_MAX_DISTANCE
+          && Math.abs(ws.lastHumanCursor.y - y) <= HUMAN_CURSOR_MAX_DISTANCE;
+        if (requestId !== null && !hasRecentHumanCursor) {
+          ws.suspiciousPixelAttempts++;
+          rejectPixel('Подведите курсор к клетке и повторите попытку');
+          return;
+        }
         const boostIsActive = (acc.cooldownBoostUntil || 0) > now && (acc.cooldownBoostPct || 0) > 0;
         const effectiveCooldownMs = boostIsActive
           ? Math.max(0, Math.round(serverSettings.cooldownMs * (1 - Math.min(100, acc.cooldownBoostPct) / 100)))
@@ -2682,6 +2743,13 @@ initDatabases().then(async () => {
 
         else if (action === 'cursor') {
           if (!ws.isAuthorized) return;
+          const cursorX = Number(data.x), cursorY = Number(data.y);
+          if (!Number.isInteger(cursorX) || !Number.isInteger(cursorY)
+            || cursorX < 0 || cursorX >= CANVAS_WIDTH || cursorY < 0 || cursorY >= CANVAS_HEIGHT) return;
+          // Публичные курсоры могут быть выключены, но доказательство
+          // наведения остаётся локальным для этого сокета.
+          ws.lastHumanCursor = { x: cursorX, y: cursorY };
+          ws.lastHumanCursorAt = Date.now();
           if (!serverSettings.cursorTrackingEnabled && !(ws.userData.clan && data.clan_only)) return;
           const msg = JSON.stringify({ action:'cursor', u:ws.userData.username, x:data.x, y:data.y, c:data.c, emoji:ws.userData.emoji||'👾', avatar:getAvatarUrl(ws.userData), clan:ws.userData.clan||'' });
           if (data.clan_only && ws.userData.clan) broadcastToClan(ws.userData.clan, msg, ws);
@@ -4433,6 +4501,14 @@ initDatabases().then(async () => {
               canvas_w:     CANVAS_WIDTH,
               canvas_h:     CANVAS_HEIGHT,
               cooldown_ms:  serverSettings.cooldownMs,
+              board_persist: {
+                last_success_at: boardPersistStatus.lastSuccessAt,
+                last_attempt_at: boardPersistStatus.lastAttemptAt,
+                snapshot_id: boardPersistStatus.lastSnapshotId,
+                last_error: boardPersistStatus.lastError,
+                consecutive_failures: boardPersistStatus.consecutiveFailures,
+                dirty: isDirty || ownersDirty,
+              },
             }));
           }
 

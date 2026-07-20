@@ -2,6 +2,7 @@
 .vs/
 .vscode/
 .env
+front/
 # Папка с пакетами Node.js (она скачивается командой npm install, ее коммитить нельзя)
 node_modules/
 
