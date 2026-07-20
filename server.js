@@ -30,6 +30,7 @@ const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const DISCORD_PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY || '';
 // Секрет Turnstile хранится только в окружении хостинга, никогда не в клиенте.
 const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
+console.log(`[ANTI-BOT] Turnstile ${TURNSTILE_SECRET_KEY ? 'enabled' : 'disabled (TURNSTILE_SECRET_KEY is missing)'}`);
 const DISCORD_TEST_USER_ID = '409071932244492308';
 const CANVAS_FILE       = path.join(__dirname, 'canvas.bin');
 const META_FILE         = path.join(__dirname, 'canvas_meta.json');
@@ -459,16 +460,24 @@ function recordAntiBotBehavior(ws, acc, now, x, y) {
   const intervalCv = meanInterval > 0 ? Math.sqrt(variance) / meanInterval : Infinity;
   const directCursorCount = recent.filter(event => event.at - event.cursorAt >= 0
     && event.at - event.cursorAt <= 75 && event.cursorMoves <= 1).length;
+  const instantTeleportCount = recent.slice(1).filter((event, index) => {
+    const previous = recent[index];
+    const distance = Math.hypot(event.x - previous.x, event.y - previous.y);
+    return distance >= 12 && event.at - event.cursorAt >= 0
+      && event.at - event.cursorAt <= 75 && event.cursorMoves <= 1;
+  }).length;
   const steps = recent.slice(1).map((event, index) => `${event.x - recent[index].x},${event.y - recent[index].y}`);
   const uniqueSteps = new Set(steps).size;
   const reasons = [];
   if (intervalCv <= ANTIBOT_BEHAVIOR_INTERVAL_CV_MAX && meanInterval >= 1000) reasons.push('ровный интервал');
   if (directCursorCount >= sampleSize - 1) reasons.push('курсор появляется прямо у цели');
   if (uniqueSteps <= 2) reasons.push('повторяющийся шаг по сетке');
+  if (instantTeleportCount >= 3) reasons.push('мгновенные прыжки курсора');
   // Не реагируем на один признак: люди могут вручную рисовать линию или
   // попадать в ритм кулдауна. Для slow mode нужен именно почти идеальный
   // ритм вместе с ещё одним независимым признаком.
-  if (!reasons.includes('ровный интервал') || reasons.length < 2
+  const hasTeleportPattern = reasons.includes('мгновенные прыжки курсора');
+  if (((!reasons.includes('ровный интервал') || reasons.length < 2) && !hasTeleportPattern)
     || now - state.lastInterventionAt < ANTIBOT_SLOW_MODE_MS) return null;
 
   state.lastInterventionAt = now;
