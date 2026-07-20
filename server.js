@@ -412,9 +412,58 @@ const HUMAN_CURSOR_MAX_DISTANCE = 2;
 const ANTIBOT_SUSPICION_WINDOW_MS = 60 * 1000;
 const ANTIBOT_SUSPICION_LIMIT = 3;
 const ANTIBOT_TIMEOUT_MS = 5 * 60 * 1000;
+const ANTIBOT_BEHAVIOR_WINDOW_MS = 15 * 60 * 1000;
+const ANTIBOT_BEHAVIOR_SAMPLE_SIZE = 16;
+const ANTIBOT_BEHAVIOR_INTERVAL_CV_MAX = 0.02;
+const ANTIBOT_SLOW_MODE_MS = 5 * 60 * 1000;
+const ANTIBOT_SLOW_MODE_MULTIPLIER = 2;
 // Ключ — имя подтверждённого Discord-аккаунта. Карта переживает переподключение,
 // но не нужна после истечения короткого окна подозрений.
 const antiBotSuspicionByUsername = new Map();
+const antiBotBehaviorByUsername = new Map();
+
+function recordAntiBotBehavior(ws, acc, now, x, y) {
+  let state = antiBotBehaviorByUsername.get(acc.username);
+  if (!state || now - state.updatedAt > ANTIBOT_BEHAVIOR_WINDOW_MS) {
+    state = { events: [], updatedAt: now, lastInterventionAt: 0, slowUntil: 0 };
+    antiBotBehaviorByUsername.set(acc.username, state);
+  }
+  state.updatedAt = now;
+  state.events.push({
+    at: now,
+    x,
+    y,
+    cursorAt: ws.lastHumanCursorAt,
+    cursorMoves: ws.cursorMovesSincePixel || 0,
+  });
+  if (state.events.length > 100) state.events.shift();
+  ws.cursorMovesSincePixel = 0;
+
+  const recent = state.events.slice(-ANTIBOT_BEHAVIOR_SAMPLE_SIZE);
+  if (recent.length < ANTIBOT_BEHAVIOR_SAMPLE_SIZE) return null;
+  const intervals = recent.slice(1).map((event, index) => event.at - recent[index].at);
+  const meanInterval = intervals.reduce((sum, value) => sum + value, 0) / intervals.length;
+  const variance = intervals.reduce((sum, value) => sum + (value - meanInterval) ** 2, 0) / intervals.length;
+  const intervalCv = meanInterval > 0 ? Math.sqrt(variance) / meanInterval : Infinity;
+  const directCursorCount = recent.filter(event => event.at - event.cursorAt >= 0
+    && event.at - event.cursorAt <= 75 && event.cursorMoves <= 1).length;
+  const steps = recent.slice(1).map((event, index) => `${event.x - recent[index].x},${event.y - recent[index].y}`);
+  const uniqueSteps = new Set(steps).size;
+  const reasons = [];
+  if (intervalCv <= ANTIBOT_BEHAVIOR_INTERVAL_CV_MAX && meanInterval >= 1000) reasons.push('ровный интервал');
+  if (directCursorCount >= ANTIBOT_BEHAVIOR_SAMPLE_SIZE - 1) reasons.push('курсор появляется прямо у цели');
+  if (uniqueSteps <= 2) reasons.push('повторяющийся шаг по сетке');
+  // Не реагируем на один признак: люди могут вручную рисовать линию или
+  // попадать в ритм кулдауна. Для slow mode нужен именно почти идеальный
+  // ритм вместе с ещё одним независимым признаком.
+  if (!reasons.includes('ровный интервал') || reasons.length < 2
+    || now - state.lastInterventionAt < ANTIBOT_SLOW_MODE_MS) return null;
+
+  state.lastInterventionAt = now;
+  state.slowUntil = Math.max(state.slowUntil || 0, now + ANTIBOT_SLOW_MODE_MS);
+  ws.antiBotSlowUntil = state.slowUntil;
+  return { reasons, until: state.slowUntil, intervalCv, meanInterval };
+}
 // Количество цветов клиента. Значения передаются в одном байте, поэтому
 // расширение палитры не меняет формат пиксельных пакетов.
 const PALETTE_COLOR_COUNT = 34;
@@ -2308,6 +2357,8 @@ initDatabases().then(async () => {
     // ни в снимки холста, ни в поток таймлапса.
     ws.lastHumanCursor = null;
     ws.lastHumanCursorAt = 0;
+    ws.cursorMovesSincePixel = 0;
+    ws.antiBotSlowUntil = 0;
     ws.suspiciousPixelAttempts = 0;
     // Короткий кэш результатов делает повтор одного requestId идемпотентным:
     // потерянный ответ можно запросить повторно без второго начисления награды.
@@ -2400,8 +2451,15 @@ initDatabases().then(async () => {
         const effectiveCooldownMs = boostIsActive
           ? Math.max(0, Math.round(serverSettings.cooldownMs * (1 - Math.min(100, acc.cooldownBoostPct) / 100)))
           : serverSettings.cooldownMs;
-        if (acc._lastPixelAt && now - acc._lastPixelAt < effectiveCooldownMs) {
-          rejectPixel('cooldown', { serverNow: now, nextAllowedAt: acc._lastPixelAt + effectiveCooldownMs });
+        const behaviorState = antiBotBehaviorByUsername.get(acc.username);
+        const antiBotSlowUntil = Math.max(ws.antiBotSlowUntil || 0, behaviorState?.slowUntil || 0);
+        ws.antiBotSlowUntil = antiBotSlowUntil;
+        const antiBotSlowMode = antiBotSlowUntil > now;
+        const guardedCooldownMs = antiBotSlowMode
+          ? effectiveCooldownMs * ANTIBOT_SLOW_MODE_MULTIPLIER
+          : effectiveCooldownMs;
+        if (acc._lastPixelAt && now - acc._lastPixelAt < guardedCooldownMs) {
+          rejectPixel('cooldown', { serverNow: now, nextAllowedAt: acc._lastPixelAt + guardedCooldownMs });
           return;
         }
 
@@ -2415,6 +2473,15 @@ initDatabases().then(async () => {
           acc._lastPixel = { x, y };
           acc._lastColor = colorIdx;
           acc._lastPixelAt = now;
+          const antiBotIntervention = recordAntiBotBehavior(ws, acc, now, x, y);
+          if (antiBotIntervention) {
+            const leftMinutes = Math.ceil((antiBotIntervention.until - now) / 60000);
+            ws.send(JSON.stringify({
+              action:'toast',
+              message:`Защитная проверка: скорость установки временно снижена на ${leftMinutes} мин.`
+            }));
+            console.warn(`[ANTI-BOT] ${acc.username}: slow mode ${leftMinutes}m; ${antiBotIntervention.reasons.join(', ')}`);
+          }
 
           const prevCoins = acc.coins || 0;
           const prevRank  = acc.rank;
@@ -2456,7 +2523,12 @@ initDatabases().then(async () => {
           // Время сервера исключает влияние неверных часов пользователя.
           sendPixelResult({
             ok:true, x, y, color:colorIdx,
-            serverNow: now, nextAllowedAt: now + effectiveCooldownMs,
+            serverNow: now, nextAllowedAt: now + (Math.max(
+              ws.antiBotSlowUntil || 0,
+              antiBotBehaviorByUsername.get(acc.username)?.slowUntil || 0,
+            ) > now
+              ? effectiveCooldownMs * ANTIBOT_SLOW_MODE_MULTIPLIER
+              : effectiveCooldownMs),
           });
         } else {
           rejectPixel('Некорректная клетка');
@@ -2772,6 +2844,9 @@ initDatabases().then(async () => {
             || cursorX < 0 || cursorX >= CANVAS_WIDTH || cursorY < 0 || cursorY >= CANVAS_HEIGHT) return;
           // Публичные курсоры могут быть выключены, но доказательство
           // наведения остаётся локальным для этого сокета.
+          if (!ws.lastHumanCursor || ws.lastHumanCursor.x !== cursorX || ws.lastHumanCursor.y !== cursorY) {
+            ws.cursorMovesSincePixel++;
+          }
           ws.lastHumanCursor = { x: cursorX, y: cursorY };
           ws.lastHumanCursorAt = Date.now();
           if (!serverSettings.cursorTrackingEnabled && !(ws.userData.clan && data.clan_only)) return;
