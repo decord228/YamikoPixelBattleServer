@@ -409,6 +409,12 @@ const COINS_PER_PIXEL = 0.1;   // 1 монета за 10 пикселей
 // вызывают placePixel()/sendPixel() напрямую, не затрагивая таймлапс.
 const HUMAN_CURSOR_MAX_AGE_MS = 15000;
 const HUMAN_CURSOR_MAX_DISTANCE = 2;
+const ANTIBOT_SUSPICION_WINDOW_MS = 60 * 1000;
+const ANTIBOT_SUSPICION_LIMIT = 3;
+const ANTIBOT_TIMEOUT_MS = 5 * 60 * 1000;
+// Ключ — имя подтверждённого Discord-аккаунта. Карта переживает переподключение,
+// но не нужна после истечения короткого окна подозрений.
+const antiBotSuspicionByUsername = new Map();
 // Количество цветов клиента. Значения передаются в одном байте, поэтому
 // расширение палитры не меняет формат пиксельных пакетов.
 const PALETTE_COLOR_COUNT = 34;
@@ -2369,7 +2375,25 @@ initDatabases().then(async () => {
           && Math.abs(ws.lastHumanCursor.y - y) <= HUMAN_CURSOR_MAX_DISTANCE;
         if (requestId !== null && !hasRecentHumanCursor) {
           ws.suspiciousPixelAttempts++;
-          rejectPixel('Подведите курсор к клетке и повторите попытку');
+          const previous = antiBotSuspicionByUsername.get(acc.username);
+          const suspicion = previous && now - previous.firstAt <= ANTIBOT_SUSPICION_WINDOW_MS
+            ? { firstAt: previous.firstAt, count: previous.count + 1 }
+            : { firstAt: now, count: 1 };
+          antiBotSuspicionByUsername.set(acc.username, suspicion);
+          if (suspicion.count >= ANTIBOT_SUSPICION_LIMIT) {
+            const timeoutUntil = now + ANTIBOT_TIMEOUT_MS;
+            acc.timeout_until = timeoutUntil;
+            await dbSaveAccount(acc.username, { timeout_until: timeoutUntil });
+            antiBotSuspicionByUsername.delete(acc.username);
+            rejectPixel('Подозрение на автоматическую установку: таймаут на 5 минут');
+            ws.send(JSON.stringify({
+              action:'toast',
+              message:'За подозрительную автоматическую установку выдан таймаут на 5 минут.'
+            }));
+            console.warn(`[ANTI-BOT] ${acc.username}: timeout 5m after ${suspicion.count} cursor-proof failures`);
+            return;
+          }
+          rejectPixel(`Подведите курсор к клетке и повторите попытку (${suspicion.count}/${ANTIBOT_SUSPICION_LIMIT})`);
           return;
         }
         const boostIsActive = (acc.cooldownBoostUntil || 0) > now && (acc.cooldownBoostPct || 0) > 0;
