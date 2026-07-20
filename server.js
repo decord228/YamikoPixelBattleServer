@@ -410,10 +410,18 @@ const COINS_PER_PIXEL = 0.1;   // 1 монета за 10 пикселей
 // Антибот: WebSocket-клиент должен недавно сообщить позицию реального
 // указателя рядом с клеткой. Это останавливает простые скрипты, которые
 // вызывают placePixel()/sendPixel() напрямую, не затрагивая таймлапс.
-const HUMAN_CURSOR_MAX_AGE_MS = 15000;
-const HUMAN_CURSOR_MAX_DISTANCE = 2;
+// У реального пользователя между событием ввода и бинарным пакетом могут быть
+// небольшая задержка, масштабирование страницы и округление координат. Запас
+// здесь не превращает статичный курсор в валидный: он всё равно обязан быть
+// рядом с выбранной клеткой.
+const HUMAN_CURSOR_MAX_AGE_MS = 30000;
+const HUMAN_CURSOR_MAX_DISTANCE = 4;
 const ANTIBOT_SUSPICION_WINDOW_MS = 60 * 1000;
-const ANTIBOT_SUSPICION_LIMIT = 3;
+// Отсутствие proof само по себе может означать старую вкладку после обновления
+// клиента. Три отклонения — слишком мало и давали таймаут обычным игрокам.
+// Таймаут остаётся только для длинной серии заблокированных автоматических
+// попыток; каждый такой пакет всё равно отклоняется сразу.
+const ANTIBOT_SUSPICION_LIMIT = 12;
 const ANTIBOT_TIMEOUT_MS = 5 * 60 * 1000;
 const ANTIBOT_BEHAVIOR_WINDOW_MS = 15 * 60 * 1000;
 const ANTIBOT_BEHAVIOR_SAMPLE_SIZE = 16;
@@ -4052,9 +4060,16 @@ initDatabases().then(async () => {
           else if (cmd === 'timeout') {
             const acc = await dbGetAccount(data.target);
             if (acc) {
-              const secs = data.params || 300;
+              // Ноль — осознанная команда администратора снять таймаут, а не
+              // отсутствие параметра. Раньше `0 || 300` делал это невозможным.
+              const requestedSecs = Number(data.params);
+              const secs = Number.isFinite(requestedSecs)
+                ? Math.max(0, Math.min(24 * 60 * 60, Math.floor(requestedSecs)))
+                : 300;
               await dbSaveAccount(data.target, { timeout_until: Date.now() + secs * 1000 });
-              ws.send(JSON.stringify({ action:'toast', message:`${data.target} получил таймаут на ${secs}с` }));
+              ws.send(JSON.stringify({ action:'toast', message:secs > 0
+                ? `${data.target} получил таймаут на ${secs}с`
+                : `Таймаут для ${data.target} снят` }));
             }
           }
 
