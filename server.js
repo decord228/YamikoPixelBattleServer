@@ -407,37 +407,21 @@ if (cloudinary && process.env.CLOUDINARY_CLOUD_NAME) {
 
 // ── COIN REWARDS ───────────────────────────────────────────
 const COINS_PER_PIXEL = 0.1;   // 1 монета за 10 пикселей
-// Антибот: WebSocket-клиент должен недавно сообщить позицию реального
-// указателя рядом с клеткой. Это останавливает простые скрипты, которые
-// вызывают placePixel()/sendPixel() напрямую, не затрагивая таймлапс.
-// У реального пользователя между событием ввода и бинарным пакетом могут быть
-// небольшая задержка, масштабирование страницы и округление координат. Запас
-// здесь не превращает статичный курсор в валидный: он всё равно обязан быть
-// рядом с выбранной клеткой.
-const HUMAN_CURSOR_MAX_AGE_MS = 30000;
-const HUMAN_CURSOR_MAX_DISTANCE = 4;
-const ANTIBOT_SUSPICION_WINDOW_MS = 60 * 1000;
-// Отсутствие proof само по себе может означать старую вкладку после обновления
-// клиента. Три отклонения — слишком мало и давали таймаут обычным игрокам.
-// Таймаут остаётся только для длинной серии заблокированных автоматических
-// попыток; каждый такой пакет всё равно отклоняется сразу.
-const ANTIBOT_SUSPICION_LIMIT = 12;
-const ANTIBOT_TIMEOUT_MS = 5 * 60 * 1000;
+// Антибот работает в наблюдательном режиме: установка пикселей не блокируется
+// по данным курсора, slow-mode и автоматический таймаут выключены. Высокий
+// риск сохраняется в журнале администратора и может запросить Turnstile.
 const ANTIBOT_BEHAVIOR_WINDOW_MS = 15 * 60 * 1000;
 const ANTIBOT_BEHAVIOR_SAMPLE_SIZE = 16;
 const ANTIBOT_BEHAVIOR_INTERVAL_CV_MAX = 0.02;
-const ANTIBOT_SLOW_MODE_MS = 5 * 60 * 1000;
+const ANTIBOT_LOG_DEDUP_MS = 2 * 60 * 1000;
 const ANTIBOT_TURNSTILE_CHALLENGE_MS = 5 * 60 * 1000;
 const ANTIBOT_TURNSTILE_CLEARANCE_MS = 30 * 60 * 1000;
-// Ключ — имя подтверждённого Discord-аккаунта. Карта переживает переподключение,
-// но не нужна после истечения короткого окна подозрений.
-const antiBotSuspicionByUsername = new Map();
 const antiBotBehaviorByUsername = new Map();
 
 function getAntiBotBehaviorState(username, now) {
   let state = antiBotBehaviorByUsername.get(username);
   if (!state || now - state.updatedAt > ANTIBOT_BEHAVIOR_WINDOW_MS) {
-    state = { events: [], updatedAt: now, lastInterventionAt: 0, slowUntil: 0, turnstileRequiredUntil: 0, turnstileVerifiedUntil: 0 };
+    state = { events: [], updatedAt: now, lastLogAt: 0, turnstileRequiredUntil: 0, turnstileVerifiedUntil: 0 };
     antiBotBehaviorByUsername.set(username, state);
   }
   state.updatedAt = now;
@@ -489,20 +473,25 @@ function recordAntiBotBehavior(ws, acc, now, x, y) {
   if (directCursorCount >= sampleSize - 1) reasons.push('курсор появляется прямо у цели');
   if (uniqueSteps <= 2) reasons.push('повторяющийся шаг по сетке');
   if (instantTeleportCount >= 3) reasons.push('мгновенные прыжки курсора');
-  if (rapidTargetJumpCount >= (sampleSize === 6 ? 4 : 7)) reasons.push('быстрые дальние прыжки целей');
-  // Не реагируем на один признак: люди могут вручную рисовать линию или
-  // попадать в ритм кулдауна. Для slow mode нужен именно почти идеальный
-  // ритм вместе с ещё одним независимым признаком.
-  const hasTeleportPattern = reasons.includes('мгновенные прыжки курсора')
-    || reasons.includes('быстрые дальние прыжки целей');
-  if (((!reasons.includes('ровный интервал') || reasons.length < 2) && !hasTeleportPattern)
-    || now - state.lastInterventionAt < ANTIBOT_SLOW_MODE_MS) return null;
+  if (rapidTargetJumpCount >= (sampleSize === 6 ? 5 : 10)) reasons.push('быстрые дальние прыжки целей');
+  // Один сигнал не достаточен: люди могут рисовать по сетке и попадать в
+  // ритм. Исключение — почти вся короткая серия турбо-установок прыгает по
+  // холсту; это лишь вызывает CAPTCHA и запись в журнал, но не наказание.
+  const hasStrongPattern = instantTeleportCount >= 3
+    || rapidTargetJumpCount >= (sampleSize === 6 ? 5 : 10);
+  const hasCombinedPattern = reasons.includes('ровный интервал') && reasons.length >= 2;
+  if ((!hasStrongPattern && !hasCombinedPattern) || now - state.lastLogAt < ANTIBOT_LOG_DEDUP_MS) return null;
 
-  state.lastInterventionAt = now;
-  state.slowUntil = Math.max(state.slowUntil || 0, now + ANTIBOT_SLOW_MODE_MS);
-  if (TURNSTILE_SECRET_KEY) state.turnstileRequiredUntil = now + ANTIBOT_TURNSTILE_CHALLENGE_MS;
-  ws.antiBotSlowUntil = state.slowUntil;
-  return { reasons, until: state.slowUntil, intervalCv, meanInterval, turnstileRequired: !!TURNSTILE_SECRET_KEY };
+  state.lastLogAt = now;
+  const turnstileRequired = !!TURNSTILE_SECRET_KEY;
+  if (turnstileRequired) state.turnstileRequiredUntil = now + ANTIBOT_TURNSTILE_CHALLENGE_MS;
+  return {
+    reasons,
+    intervalCv,
+    meanInterval,
+    turnstileRequired,
+    sample: recent.map(event => ({ at:event.at, x:event.x, y:event.y, cursorAt:event.cursorAt || 0, cursorMoves:event.cursorMoves || 0 })),
+  };
 }
 
 async function validateTurnstileToken(token, remoteIp) {
@@ -840,7 +829,7 @@ const dbTimeout = (promise, ms = 4000) => Promise.race([
 ]);
 
 // ── MONGOOSE SCHEMAS ───────────────────────────────────────
-let AccountModel = null, ClanModel = null, TemplateModel = null, SettingsModel = null, NewsModel = null, DMModel = null;
+let AccountModel = null, ClanModel = null, TemplateModel = null, SettingsModel = null, NewsModel = null, DMModel = null, AntiBotLogModel = null;
 
 if (mongoose) {
   mongoose.set('bufferCommands', false);
@@ -989,12 +978,24 @@ if (mongoose) {
     messages: { type: Array, default: [] }, // [{ from, text, ts }]
   }, { timestamps: true, autoIndex: false });
 
+  // Журнал не является наказанием: он хранит только уже сработавшие
+  // высокорисковые серии для ручного разбора администратором.
+  const AntiBotLogSchema = new mongoose.Schema({
+    username:         { type: String, required: true, index: true },
+    reasons:          { type: [String], default: [] },
+    metrics:          { type: Object, default: {} },
+    sample:           { type: Array, default: [] },
+    captcha_required: { type: Boolean, default: false },
+    reviewed:         { type: Boolean, default: false },
+  }, { timestamps: true, autoIndex: false });
+
   AccountModel  = mongoose.model('Account',  AccountSchema);
   ClanModel     = mongoose.model('Clan',      ClanSchema);
   TemplateModel = mongoose.model('Template',  TemplateSchema);
   SettingsModel = mongoose.model('Setting',   SettingsSchema);
   NewsModel     = mongoose.model('News',      NewsSchema);
   DMModel       = mongoose.model('DirectMessage', DMSchema);
+  AntiBotLogModel = mongoose.model('AntiBotLog', AntiBotLogSchema);
 }
 
 // ── REDIS ──────────────────────────────────────────────────
@@ -1104,6 +1105,54 @@ async function dbGetAllAccounts() {
     catch(e) { console.error('❌ dbGetAllAccounts:', e.message); return []; }
   }
   return Object.entries(accounts).map(([username, v]) => ({ username, ...v }));
+}
+
+// ── ANTI-BOT REVIEW LOG ─────────────────────────────────────
+// В локальном режиме журнал остаётся доступен до перезапуска. В production
+// (MongoDB) он сохраняется отдельно от аккаунтов и холста.
+const ANTI_BOT_REVIEW_LOG_FILE = path.join(__dirname, 'anti_bot_review_log.json');
+let antiBotReviewLog = [];
+function saveLocalAntiBotReviewLog() {
+  try { fs.writeFileSync(ANTI_BOT_REVIEW_LOG_FILE, JSON.stringify(antiBotReviewLog, null, 2)); }
+  catch (error) { console.error('[ANTI-BOT] local review log save:', error.message); }
+}
+async function dbCreateAntiBotLog(entry) {
+  const safeEntry = {
+    username: String(entry.username || '').slice(0, 48),
+    reasons: Array.isArray(entry.reasons) ? entry.reasons.slice(0, 8) : [],
+    metrics: entry.metrics && typeof entry.metrics === 'object' ? entry.metrics : {},
+    sample: Array.isArray(entry.sample) ? entry.sample.slice(-16) : [],
+    captcha_required: !!entry.captcha_required,
+    reviewed: false,
+  };
+  if (AntiBotLogModel) {
+    try { await dbTimeout(AntiBotLogModel.create(safeEntry)); }
+    catch (error) { console.error('[ANTI-BOT] review log save:', error.message); }
+    return;
+  }
+  antiBotReviewLog.unshift({ ...safeEntry, _id: crypto.randomUUID(), createdAt: new Date() });
+  if (antiBotReviewLog.length > 500) antiBotReviewLog.length = 500;
+  saveLocalAntiBotReviewLog();
+}
+
+async function dbGetAntiBotLogs(limit = 100) {
+  const safeLimit = Math.max(1, Math.min(200, Number(limit) || 100));
+  if (AntiBotLogModel) {
+    try { return await dbTimeout(AntiBotLogModel.find({}).sort({ createdAt: -1 }).limit(safeLimit).lean().exec()); }
+    catch (error) { console.error('[ANTI-BOT] review log read:', error.message); return []; }
+  }
+  return antiBotReviewLog.slice(0, safeLimit);
+}
+
+async function dbMarkAntiBotLogReviewed(id) {
+  if (!id) return;
+  if (AntiBotLogModel) {
+    try { await dbTimeout(AntiBotLogModel.findByIdAndUpdate(id, { reviewed: true }).exec()); }
+    catch (error) { console.error('[ANTI-BOT] review log update:', error.message); }
+    return;
+  }
+  const entry = antiBotReviewLog.find(item => item._id === id);
+  if (entry) { entry.reviewed = true; saveLocalAntiBotReviewLog(); }
 }
 
 // ── МАГАЗИН КЛАНА ──
@@ -1490,7 +1539,7 @@ async function initDatabases() {
       console.log('✅ MongoDB Atlas подключён');
     } catch(e) {
       console.error('❌ MongoDB:', e.message);
-      mongoose = null; AccountModel = null; ClanModel = null; TemplateModel = null; SettingsModel = null; DMModel = null;
+      mongoose = null; AccountModel = null; ClanModel = null; TemplateModel = null; SettingsModel = null; DMModel = null; AntiBotLogModel = null;
     }
   }
 
@@ -1512,6 +1561,13 @@ async function initDatabases() {
       try { accounts = JSON.parse(fs.readFileSync(af, 'utf8')); } catch(e) {}
     }
     if (accounts['d3cord']?.email === 'otarasik10@gmail.com') accounts['d3cord'].role = 'admin';
+  }
+
+  if (!AntiBotLogModel && fs.existsSync(ANTI_BOT_REVIEW_LOG_FILE)) {
+    try {
+      const savedLog = JSON.parse(fs.readFileSync(ANTI_BOT_REVIEW_LOG_FILE, 'utf8'));
+      if (Array.isArray(savedLog)) antiBotReviewLog = savedLog.slice(0, 500);
+    } catch (error) { console.error('[ANTI-BOT] local review log load:', error.message); }
   }
 
   // Новости из файла (если нет MongoDB)
@@ -2418,8 +2474,6 @@ initDatabases().then(async () => {
     ws.lastHumanCursor = null;
     ws.lastHumanCursorAt = 0;
     ws.cursorMovesSincePixel = 0;
-    ws.antiBotSlowUntil = 0;
-    ws.suspiciousPixelAttempts = 0;
     // Короткий кэш результатов делает повтор одного requestId идемпотентным:
     // потерянный ответ можно запросить повторно без второго начисления награды.
     ws.pixelRequestResults = new Map();
@@ -2488,48 +2542,12 @@ initDatabases().then(async () => {
         // кулдаун, уменьшенный активным личным ускорителем.
         // Базовая защита от скриптов, которые отправляют бинарные пакеты
         // напрямую. Реальный клиент сообщает координату указателя до клика.
-        // Оба формата проходят один и тот же антибот-барьер. Иначе скрипт
-        // может просто послать старый 5-байтовый пакет и полностью обойти
-        // всю защиту. Обычный актуальный клиент использует 9 байт.
-        const hasRecentHumanCursor = ws.lastHumanCursor
-          && now - ws.lastHumanCursorAt <= HUMAN_CURSOR_MAX_AGE_MS
-          && Math.abs(ws.lastHumanCursor.x - x) <= HUMAN_CURSOR_MAX_DISTANCE
-          && Math.abs(ws.lastHumanCursor.y - y) <= HUMAN_CURSOR_MAX_DISTANCE;
-        if (!hasRecentHumanCursor) {
-          ws.suspiciousPixelAttempts++;
-          const previous = antiBotSuspicionByUsername.get(acc.username);
-          const suspicion = previous && now - previous.firstAt <= ANTIBOT_SUSPICION_WINDOW_MS
-            ? { firstAt: previous.firstAt, count: previous.count + 1 }
-            : { firstAt: now, count: 1 };
-          antiBotSuspicionByUsername.set(acc.username, suspicion);
-          if (suspicion.count >= ANTIBOT_SUSPICION_LIMIT) {
-            const timeoutUntil = now + ANTIBOT_TIMEOUT_MS;
-            acc.timeout_until = timeoutUntil;
-            await dbSaveAccount(acc.username, { timeout_until: timeoutUntil });
-            antiBotSuspicionByUsername.delete(acc.username);
-            rejectPixel('restricted');
-            console.warn(`[ANTI-BOT] ${acc.username}: timeout 5m after ${suspicion.count} cursor-proof failures`);
-            return;
-          }
-          rejectPixel('restricted');
-          return;
-        }
         const boostIsActive = (acc.cooldownBoostUntil || 0) > now && (acc.cooldownBoostPct || 0) > 0;
         const effectiveCooldownMs = boostIsActive
           ? Math.max(0, Math.round(serverSettings.cooldownMs * (1 - Math.min(100, acc.cooldownBoostPct) / 100)))
           : serverSettings.cooldownMs;
-        const behaviorState = antiBotBehaviorByUsername.get(acc.username);
-        const antiBotSlowUntil = Math.max(ws.antiBotSlowUntil || 0, behaviorState?.slowUntil || 0);
-        ws.antiBotSlowUntil = antiBotSlowUntil;
-        const antiBotSlowMode = antiBotSlowUntil > now;
-        // Для подозрительной серии не просто удлиняем ускоренный КД, а
-        // временно возвращаем базовый серверный. Иначе VIP-буст −90%
-        // превращал бы антибот-замедление всего в 2 секунды.
-        const guardedCooldownMs = antiBotSlowMode
-          ? serverSettings.cooldownMs
-          : effectiveCooldownMs;
-        if (acc._lastPixelAt && now - acc._lastPixelAt < guardedCooldownMs) {
-          rejectPixel('cooldown', { serverNow: now, nextAllowedAt: acc._lastPixelAt + guardedCooldownMs });
+        if (acc._lastPixelAt && now - acc._lastPixelAt < effectiveCooldownMs) {
+          rejectPixel('cooldown', { serverNow: now, nextAllowedAt: acc._lastPixelAt + effectiveCooldownMs });
           return;
         }
 
@@ -2545,8 +2563,17 @@ initDatabases().then(async () => {
           acc._lastPixelAt = now;
           const antiBotIntervention = recordAntiBotBehavior(ws, acc, now, x, y);
           if (antiBotIntervention) {
-            const leftMinutes = Math.ceil((antiBotIntervention.until - now) / 60000);
-            console.warn(`[ANTI-BOT] ${acc.username}: slow mode ${leftMinutes}m; ${antiBotIntervention.reasons.join(', ')}`);
+            void dbCreateAntiBotLog({
+              username: acc.username,
+              reasons: antiBotIntervention.reasons,
+              metrics: {
+                interval_cv: Number(antiBotIntervention.intervalCv.toFixed(4)),
+                mean_interval_ms: Math.round(antiBotIntervention.meanInterval),
+              },
+              sample: antiBotIntervention.sample,
+              captcha_required: antiBotIntervention.turnstileRequired,
+            });
+            console.warn(`[ANTI-BOT] review log for ${acc.username}: ${antiBotIntervention.reasons.join(', ')}`);
             if (antiBotIntervention.turnstileRequired) {
               ws.send(JSON.stringify({ action:'turnstile_required', expires_at:now + ANTIBOT_TURNSTILE_CHALLENGE_MS }));
             }
@@ -2593,11 +2620,9 @@ initDatabases().then(async () => {
           sendPixelResult({
             ok:true, x, y, color:colorIdx,
             serverNow: now, nextAllowedAt: now + (Math.max(
-              ws.antiBotSlowUntil || 0,
-              antiBotBehaviorByUsername.get(acc.username)?.slowUntil || 0,
-            ) > now
-              ? serverSettings.cooldownMs
-              : effectiveCooldownMs),
+              0,
+              effectiveCooldownMs,
+            )),
           });
         } else {
           rejectPixel('Некорректная клетка');
@@ -4017,7 +4042,17 @@ initDatabases().then(async () => {
           }
           const cmd = data.cmd;
 
-          if (cmd === 'get_users') {
+          if (cmd === 'get_antibot_logs') {
+            const logs = await dbGetAntiBotLogs(data.limit);
+            ws.send(JSON.stringify({ action:'admin_antibot_logs', logs }));
+          }
+
+          else if (cmd === 'review_antibot_log') {
+            await dbMarkAntiBotLogReviewed(data.params?.id);
+            ws.send(JSON.stringify({ action:'admin_antibot_log_reviewed', id:data.params?.id || '' }));
+          }
+
+          else if (cmd === 'get_users') {
             const recipientPicker = data.recipient_picker === true;
             const requestedPage = Number(data.page) || 1, limit = recipientPicker ? 1000 : 10;
             const query = typeof data.query === 'string' ? data.query.trim().toLocaleLowerCase('ru-RU') : '';
